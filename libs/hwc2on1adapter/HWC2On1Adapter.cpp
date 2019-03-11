@@ -484,19 +484,22 @@ Error HWC2On1Adapter::registerCallback(Callback descriptor,
     if (hasPendingInvalidate) {
         auto refresh = reinterpret_cast<HWC2_PFN_REFRESH>(pointer);
         for (auto displayId : displayIds) {
-            refresh(callbackData, displayId);
+            if(refresh)
+                refresh(callbackData, displayId);
         }
     }
     if (!pendingVsyncs.empty()) {
         auto vsync = reinterpret_cast<HWC2_PFN_VSYNC>(pointer);
         for (auto& pendingVsync : pendingVsyncs) {
-            vsync(callbackData, pendingVsync.first, pendingVsync.second);
+            if(vsync)
+                vsync(callbackData, pendingVsync.first, pendingVsync.second);
         }
     }
     if (!pendingHotplugs.empty()) {
         auto hotplug = reinterpret_cast<HWC2_PFN_HOTPLUG>(pointer);
         for (auto& pendingHotplug : pendingHotplugs) {
-            hotplug(callbackData, pendingHotplug.first, pendingHotplug.second);
+            if(hotplug)
+                hotplug(callbackData, pendingHotplug.first, pendingHotplug.second);
         }
     }
     return Error::None;
@@ -1914,6 +1917,7 @@ HWC2On1Adapter::Layer::Layer(Display& display)
     mSourceCrop({0.0f, 0.0f, -1.0f, -1.0f}),
     mTransform(Transform::None),
     mVisibleRegion(),
+    mDataSpace(HAL_DATASPACE_UNKNOWN),
     mZ(0),
     mReleaseFence(),
     mHwc1Id(0),
@@ -1943,7 +1947,8 @@ Error HWC2On1Adapter::Layer::setCursorPosition(int32_t x, int32_t y) {
 
     auto displayId = mDisplay.getHwc1Id();
     auto hwc1Device = mDisplay.getDevice().getHwc1Device();
-    hwc1Device->setCursorPositionAsync(hwc1Device, displayId, x, y);
+    if(hwc1Device->setCursorPositionAsync)
+        hwc1Device->setCursorPositionAsync(hwc1Device, displayId, x, y);
     return Error::None;
 }
 
@@ -1977,7 +1982,9 @@ Error HWC2On1Adapter::Layer::setCompositionType(Composition type) {
     return Error::None;
 }
 
-Error HWC2On1Adapter::Layer::setDataspace(android_dataspace_t) {
+Error HWC2On1Adapter::Layer::setDataspace(android_dataspace_t dataspace) {
+    mDataSpace = dataspace;
+    mDisplay.markGeometryChanged();
     return Error::None;
 }
 
@@ -2102,6 +2109,7 @@ std::string HWC2On1Adapter::Layer::dump() const {
                 frectString(mSourceCrop) << '\n';
         output << fill << "  Transform: " << to_string(mTransform);
         output << "  Blend mode: " << to_string(mBlendMode);
+        output << " DataSpace: " << mDataSpace;
         if (mPlaneAlpha != 1.0f) {
             output << "  Alpha: " <<
                 alphaString(mPlaneAlpha) << '\n';
@@ -2145,8 +2153,25 @@ void HWC2On1Adapter::Layer::applyCommonState(hwc_layer_1_t& hwc1Layer) {
         hwc1Layer.sourceCropi.bottom =
                 static_cast<int32_t>(std::floor(pending.bottom));
     } else {
+#if  1 //!RK_USE_DRM
+        auto pending = mSourceCrop;
+        hwc1Layer.sourceCropi.left =
+                static_cast<int32_t>(std::ceil(pending.left));
+        hwc1Layer.sourceCropi.top =
+                static_cast<int32_t>(std::ceil(pending.top));
+        hwc1Layer.sourceCropi.right =
+                static_cast<int32_t>(std::floor(pending.right));
+        hwc1Layer.sourceCropi.bottom =
+                static_cast<int32_t>(std::floor(pending.bottom));
+#endif
         hwc1Layer.sourceCropf = mSourceCrop;
     }
+
+    auto pendingDataSpace = mDataSpace;
+    hwc1Layer.reserved[0] = pendingDataSpace & 0xFF;
+    hwc1Layer.reserved[1] = (pendingDataSpace >> 8) & 0xFF;
+    hwc1Layer.reserved[2] = (pendingDataSpace >> 16) & 0xFF;
+    hwc1Layer.reserved[3] = (pendingDataSpace >> 24) & 0xFF;
 
     hwc1Layer.transform = static_cast<uint32_t>(mTransform);
 
@@ -2576,12 +2601,34 @@ void HWC2On1Adapter::hwc1Vsync(int hwc1DisplayId, int64_t timestamp) {
     lock.unlock();
 
     auto vsync = reinterpret_cast<HWC2_PFN_VSYNC>(callbackInfo.pointer);
-    vsync(callbackInfo.data, displayId, timestamp);
+    if(vsync)
+        vsync(callbackInfo.data, displayId, timestamp);
 }
+
+Error HWC2On1Adapter::Display::destroyLayers() {
+    std::unique_lock<std::recursive_mutex> lock(mStateMutex);
+
+    for (auto current = mLayers.begin(); current != mLayers.end(); ++current) {
+        for(auto current2 = mDevice.mLayers.begin(); current2 != mDevice.mLayers.end(); )
+        {
+          if(**current == *(current2->second))
+          {
+            current2=mDevice.mLayers.erase(current2);
+          }
+          else
+            ++current2;
+        }
+    }
+
+    mLayers.clear();
+    markGeometryChanged();
+
+    return Error::None;
+}
+
 
 void HWC2On1Adapter::hwc1Hotplug(int hwc1DisplayId, int connected) {
     ALOGV("Received hwc1Hotplug(%d, %d)", hwc1DisplayId, connected);
-
     if (hwc1DisplayId != HWC_DISPLAY_EXTERNAL) {
         ALOGE("hwc1Hotplug: Received hotplug for non-external display");
         return;
@@ -2618,10 +2665,28 @@ void HWC2On1Adapter::hwc1Hotplug(int hwc1DisplayId, int connected) {
             return;
         }
 
-        // Disconnect an existing display
         displayId = mHwc1DisplayMap[hwc1DisplayId];
+        auto& display = mDisplays[displayId];
+
+        display->destroyLayers();
+
+        // Disconnect an existing display
         mHwc1DisplayMap.erase(HWC_DISPLAY_EXTERNAL);
         mDisplays.erase(displayId);
+        //Remove extern display context if plug out HDMI.
+        //Fix crash when plug out HDMI.
+        /*
+          F DEBUG   : signal 11 (SIGSEGV), code 1 (SEGV_MAPERR), fault addr 0x10
+          ...
+          F DEBUG   :     #00 pc 0000000000068790  /system/lib64/libc.so (pthread_mutex_lock)
+          F DEBUG   :     #01 pc 00000000000b8a7c  /system/lib64/vndk-sp/libc++.so (std::__1::recursive_mutex::lock()+8)
+          F DEBUG   :     #02 pc 00000000000116f4  /vendor/lib64/libhwc2on1adapter.so (android::HWC2On1Adapter::setAllDisplays()+740)
+          F DEBUG   :     #03 pc 00000000000112b8  /vendor/lib64/libhwc2on1adapter.so (android::HWC2On1Adapter::Display::present(int*)+72)
+        */
+        if (mHwc1Contents[HWC_DISPLAY_EXTERNAL] != nullptr)
+        {
+           mHwc1Contents.erase(mHwc1Contents.begin()+HWC_DISPLAY_EXTERNAL);
+        }
     }
 
     const auto& callbackInfo = mCallbacks[Callback::Hotplug];

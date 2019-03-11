@@ -76,6 +76,12 @@
 #include <thread>
 #include <utility>
 
+#define RK_FPS          	(1)
+/* Fix video splash bug when rotate video */
+#define RK_DELAY_FOR_CAPTURE 	(1)
+#define RK_WFD_OPT      	(1)
+#define RK_CTS_GTS      	(1)
+
 namespace android {
 
 // ---------------------------------------------------------------------------
@@ -113,7 +119,6 @@ class SurfaceFlinger : public BnSurfaceComposer,
 #endif
 {
 public:
-
     // This is the phase offset in nanoseconds of the software vsync event
     // relative to the vsync event reported by HWComposer.  The software vsync
     // event is when SurfaceFlinger and Choreographer-based applications run each
@@ -216,6 +221,10 @@ public:
     // is received
     // TODO: this should be made accessible only to MessageQueue
     void onMessageReceived(int32_t what);
+#if RK_FPS
+    //add by rk for fps
+    void debugShowFPS() const;
+#endif
 
     // for debugging only
     // TODO: this should be made accessible only to HWComposer
@@ -228,7 +237,21 @@ public:
     bool authenticateSurfaceTextureLocked(
         const sp<IGraphicBufferProducer>& bufferProducer) const;
 
+#if RK_HW_ROTATION
+    // see DisplayDevice::mHardwareOrientation
+    int mHardwareOrientation;
+    // Get hardware orientation
+    int getHardwareOrientation() const { return mHardwareOrientation; }
+
+    /** 
+     * orientation_of_pre_rotated_display 是否是 90 度的整数倍.
+     * 若是, 则 pre_rotated_display 的 "宽度 和 高度", 将分别是 original_display 的 "高度 和 宽度".
+     */
+    bool orientationSwap() const { return mHardwareOrientation % 2; }
+#endif
+
 private:
+    bool mIsSkipThisFrame = false;
     friend class Client;
     friend class DisplayEventConnection;
     friend class EventThread;
@@ -482,6 +505,10 @@ private:
     /* ------------------------------------------------------------------------
      * Display and layer stack management
      */
+    status_t updateDimensionsLocked(const sp<const DisplayDevice>& displayDevice,
+                                    Transform::orientation_flags rotation,
+                                    uint32_t* requestedWidth, uint32_t* requestedHeight);
+
     // called when starting, or restarting after system_server death
     void initializeDisplays();
 
@@ -566,6 +593,7 @@ private:
     void setUpHWComposer();
     void doComposition();
     void doDebugFlashRegions();
+    bool skipFramesBeforRotate(const sp<const DisplayDevice>& displayDevice, int& index, int skipFrameNum);
     void doDisplayComposition(const sp<const DisplayDevice>& displayDevice, const Region& dirtyRegion);
 
     // compose surfaces for display hw. this fails if using GL and the surface
@@ -727,6 +755,10 @@ private:
     // Restrict layers to use two buffers in their bufferqueues.
     bool mLayerTripleBufferingDisabled = false;
 
+#if RK_WFD_OPT
+    int mWfdOptimize;
+#endif
+
     // these are thread safe
     mutable MessageQueue mEventQueue;
     FrameTracker mAnimFrameTracker;
@@ -765,6 +797,14 @@ private:
     bool mDaltonize;
 #endif
 
+#if RK_FPS
+    //add by rk for fps
+    int mDebugFPS;
+#endif
+
+#if RK_DELAY_FOR_CAPTURE
+    int mDelayFlag;
+#endif
     mat4 mPreviousColorMatrix;
     mat4 mColorMatrix;
     bool mHasColorMatrix;

@@ -202,6 +202,7 @@ private:
             HWC2::Error acceptChanges();
             HWC2::Error createLayer(hwc2_layer_t* outLayerId);
             HWC2::Error destroyLayer(hwc2_layer_t layerId);
+            HWC2::Error destroyLayers();
             HWC2::Error getActiveConfig(hwc2_config_t* outConfigId);
             HWC2::Error getAttribute(hwc2_config_t configId,
                     HWC2::Attribute attribute, int32_t* outValue);
@@ -598,7 +599,7 @@ private:
             hwc_frect_t mSourceCrop;
             HWC2::Transform mTransform;
             std::vector<hwc_rect_t> mVisibleRegion;
-
+            android_dataspace_t mDataSpace;
             uint32_t mZ;
 
             DeferredFence mReleaseFence;

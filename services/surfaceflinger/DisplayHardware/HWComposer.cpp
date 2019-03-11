@@ -137,6 +137,17 @@ void HWComposer::onHotplug(hwc2_display_t displayId,
             mHwcDisplaySlots[displayId] = 1;
         }
     }
+
+#if !RK_USE_DRM && RK_SUPPORT
+    int disp = display->getId();
+    if (disp == HWC_DISPLAY_PRIMARY) {
+        int value = 0;
+        value = getActiveConfig(disp)->getVsyncPeriod();
+        mDisplayData[disp].updateRefresh = size_t(value);
+        return;
+    }
+#endif
+
 }
 
 bool HWComposer::onVsync(hwc2_display_t displayId, int64_t timestamp,
@@ -255,6 +266,7 @@ HWC2::Layer* HWComposer::createLayer(int32_t displayId) {
     return layer;
 }
 
+
 void HWComposer::destroyLayer(int32_t displayId, HWC2::Layer* layer) {
     if (!isValidDisplay(displayId)) {
         ALOGE("Failed to destroy layer on invalid display %d", displayId);
@@ -266,6 +278,22 @@ void HWComposer::destroyLayer(int32_t displayId, HWC2::Layer* layer) {
         ALOGE("Failed to destroy layer on display %d: %s (%d)", displayId,
                 to_string(error).c_str(), static_cast<int32_t>(error));
     }
+}
+
+uint32_t HWComposer::getWidth(int32_t displayId) const {
+    return getActiveConfig(displayId)->getWidth();
+}
+
+uint32_t HWComposer::getHeight(int32_t displayId) const {
+    return getActiveConfig(displayId)->getHeight();
+}
+
+float HWComposer::getDpiX(int32_t displayId) const {
+    return getActiveConfig(displayId)->getDpiX();
+}
+
+float HWComposer::getDpiY(int32_t displayId) const {
+    return getActiveConfig(displayId)->getDpiY();
 }
 
 nsecs_t HWComposer::getRefreshTimestamp(int32_t displayId) const {
@@ -572,6 +600,23 @@ bool HWComposer::hasClientComposition(int32_t displayId) const {
     return mDisplayData[displayId].hasClientComposition;
 }
 
+#if RK_COMP_TYPE
+bool HWComposer::hasBlitComposition(int32_t displayId) const {
+    if (!isValidDisplay(displayId)) {
+        ALOGE("getPresentFence failed for invalid display %d", displayId);
+        return false;
+    }
+    return mDisplayData[displayId].hasBlitComp;
+}
+bool HWComposer::hasLcdComposition(int32_t displayId) const {
+    if (!isValidDisplay(displayId)) {
+        ALOGE("getPresentFence failed for invalid display %d", displayId);
+        return false;
+    }
+    return mDisplayData[displayId].haslcdComp;
+}
+#endif
+
 sp<Fence> HWComposer::getPresentFence(int32_t displayId) const {
     if (!isValidDisplay(displayId)) {
         ALOGE("getPresentFence failed for invalid display %d", displayId);
@@ -871,6 +916,12 @@ HWComposer::DisplayData::DisplayData()
   : hasClientComposition(false),
     hasDeviceComposition(false),
     hwcDisplay(nullptr),
+#if RK_COMP_TYPE
+    hasBlitComp(false), haslcdComp(false),
+#endif
+#if RK_SUPPORT
+    updateRefresh(0),
+#endif
     lastPresentFence(Fence::NO_FENCE),
     outbufHandle(nullptr),
     outbufAcquireFence(Fence::NO_FENCE),

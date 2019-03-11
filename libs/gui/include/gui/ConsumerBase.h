@@ -89,6 +89,9 @@ public:
     // See IGraphicBufferConsumer::setDefaultBufferDataSpace
     status_t setDefaultBufferDataSpace(android_dataspace defaultDataSpace);
 
+    // for RK_STEREO
+    int32_t getAlreadyStereo();
+
     // See IGraphicBufferConsumer::getOccupancyHistory
     status_t getOccupancyHistory(bool forceFlush,
             std::vector<OccupancyTracker::Segment>* outHistory);
@@ -261,6 +264,9 @@ protected:
     //
     // This mutex is intended to be locked by derived classes.
     mutable Mutex mMutex;
+
+    // for RK_STEREO
+    int32_t mAlreadyStereo;
 };
 
 // ----------------------------------------------------------------------------

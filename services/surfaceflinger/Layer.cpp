@@ -19,6 +19,10 @@
 #define LOG_TAG "Layer"
 #define ATRACE_TAG ATRACE_TAG_GRAPHICS
 
+// #define ENABLE_DEBUG_LOG
+#include <log/custom_log.h>
+
+
 #include <stdlib.h>
 #include <stdint.h>
 #include <sys/types.h>
@@ -55,13 +59,37 @@
 #include "RenderEngine/RenderEngine.h"
 
 #include <mutex>
-
+#if RK_NV12_10_TO_NV12_BY_RGA
+#define UN_NEED_GL
+#include <RockchipRga.h>
+#endif
+#if (RK_NV12_10_TO_NV12_BY_NENO | RK_HDR)
+#include <dlfcn.h>
+#endif
 #define DEBUG_RESIZE    0
 
+#if defined(EECOLOR)
+#include "eeColorAPI/eeColorAPI.h"
+extern eeColor::APIFunctions gEEColorAPIFunctions;
+
+bool gbUseEEColorShader = false;
+#endif
+
 namespace android {
+#if (RK_NV12_10_TO_NV12_BY_RGA | RK_NV12_10_TO_NV12_BY_NENO | RK_HDR)
+typedef struct
+{
+     sp<GraphicBuffer> yuvTexBuffer;
+     EGLImageKHR img;
+} TexBufferImag;
+
+#define TexBufferMax  2
+#define TexKey 0x524f434b
+static TexBufferImag yuvTeximg[TexBufferMax] = {{NULL,EGL_NO_IMAGE_KHR},{NULL,EGL_NO_IMAGE_KHR}};
+#endif
 
 // ---------------------------------------------------------------------------
-
+static const gralloc_module_t *g_gralloc = NULL;
 int32_t Layer::sSequence = 1;
 
 Layer::Layer(SurfaceFlinger* flinger, const sp<Client>& client,
@@ -103,6 +131,7 @@ Layer::Layer(SurfaceFlinger* flinger, const sp<Client>& client,
         mQueueItems(),
         mLastFrameNumberReceived(0),
         mUpdateTexImageFailed(false),
+        mDrawingScreenshot(false),
         mAutoRefresh(false),
         mFreezeGeometryUpdates(false)
 {
@@ -165,7 +194,196 @@ Layer::Layer(SurfaceFlinger* flinger, const sp<Client>& client,
     CompositorTiming compositorTiming;
     flinger->getCompositorTiming(&compositorTiming);
     mFrameEventHistory.initializeCompositorTiming(compositorTiming);
+
+    int ret = hw_get_module(GRALLOC_HARDWARE_MODULE_ID,
+                      (const hw_module_t **)&g_gralloc);
+    if (ret) {
+        ALOGE("Failed to open gralloc module %d", ret);
+    }
 }
+
+int get_handle_displayStereo(buffer_handle_t hnd)
+{
+    int ret = 0;
+    int op = GRALLOC_MODULE_PERFORM_GET_RK_ASHMEM;
+    struct rk_ashmem_t rk_ashmem;
+
+    if(g_gralloc && g_gralloc->perform)
+        ret = g_gralloc->perform(g_gralloc, op, hnd, &rk_ashmem);
+    else
+        ret = -EINVAL;
+
+    if(ret != 0)
+    {
+        ALOGE("%s:cann't get value from gralloc", __FUNCTION__);
+    }
+
+    return rk_ashmem.displayStereo;
+}
+
+int set_handle_displayStereo(buffer_handle_t hnd, int32_t displayStereo)
+{
+    int ret = 0;
+    int op = GRALLOC_MODULE_PERFORM_GET_RK_ASHMEM;
+    struct rk_ashmem_t rk_ashmem;
+
+    if(g_gralloc && g_gralloc->perform)
+        ret = g_gralloc->perform(g_gralloc, op, hnd, &rk_ashmem);
+    else
+        ret = -EINVAL;
+
+    if(ret != 0)
+    {
+        ALOGE("%s:cann't get value from gralloc", __FUNCTION__);
+        goto exit;
+    }
+
+    if(displayStereo != rk_ashmem.displayStereo)
+    {
+        op = GRALLOC_MODULE_PERFORM_SET_RK_ASHMEM;
+        rk_ashmem.displayStereo = displayStereo;
+
+        if(g_gralloc && g_gralloc->perform)
+            ret = g_gralloc->perform(g_gralloc, op, hnd, &rk_ashmem);
+        else
+            ret = -EINVAL;
+
+        if(ret != 0)
+        {
+            ALOGE("%s:cann't get value from gralloc", __FUNCTION__);
+        }
+    }
+
+exit:
+    return ret;
+}
+
+int get_handle_alreadyStereo(buffer_handle_t hnd)
+{
+    int ret = 0;
+    int op = GRALLOC_MODULE_PERFORM_GET_RK_ASHMEM;
+    struct rk_ashmem_t rk_ashmem;
+
+    if(g_gralloc && g_gralloc->perform)
+        ret = g_gralloc->perform(g_gralloc, op, hnd, &rk_ashmem);
+    else
+        ret = -EINVAL;
+
+    if(ret != 0)
+    {
+        ALOGE("%s:cann't get value from gralloc", __FUNCTION__);
+    }
+
+    return rk_ashmem.alreadyStereo;
+}
+
+int set_handle_alreadyStereo(buffer_handle_t hnd, int32_t alreadyStereo)
+{
+    int ret = 0;
+    int op = GRALLOC_MODULE_PERFORM_GET_RK_ASHMEM;
+    struct rk_ashmem_t rk_ashmem;
+
+    if(g_gralloc && g_gralloc->perform)
+        ret = g_gralloc->perform(g_gralloc, op, hnd, &rk_ashmem);
+    else
+        ret = -EINVAL;
+
+    if(ret != 0)
+    {
+        ALOGE("%s:cann't get value from gralloc", __FUNCTION__);
+        goto exit;
+    }
+
+    if(alreadyStereo != rk_ashmem.alreadyStereo )
+    {
+        op = GRALLOC_MODULE_PERFORM_SET_RK_ASHMEM;
+        rk_ashmem.alreadyStereo = alreadyStereo;
+
+        if(g_gralloc && g_gralloc->perform)
+            ret = g_gralloc->perform(g_gralloc, op, hnd, &rk_ashmem);
+        else
+            ret = -EINVAL;
+
+        if(ret != 0)
+        {
+            ALOGE("%s:cann't get value from gralloc", __FUNCTION__);
+        }
+    }
+
+exit:
+    return ret;
+}
+
+int get_handle_layername(buffer_handle_t hnd, char* layername, unsigned long len)
+{
+    int ret = 0;
+    int op = GRALLOC_MODULE_PERFORM_GET_RK_ASHMEM;
+    struct rk_ashmem_t rk_ashmem;
+    unsigned long str_size;
+
+    if(!layername)
+        return -EINVAL;
+
+    if(g_gralloc && g_gralloc->perform)
+        ret = g_gralloc->perform(g_gralloc, op, hnd, &rk_ashmem);
+    else
+        ret = -EINVAL;
+
+    if(ret != 0)
+    {
+        ALOGE("%s:cann't get value from gralloc", __FUNCTION__);
+        goto exit;
+    }
+
+    str_size = strlen(rk_ashmem.LayerName)+1;
+    str_size = str_size > len ? len:str_size;
+    memcpy(layername,rk_ashmem.LayerName,str_size);
+
+exit:
+    return ret;
+}
+
+int set_handle_layername(buffer_handle_t hnd, const char* layername)
+{
+    int ret = 0;
+    int op = GRALLOC_MODULE_PERFORM_GET_RK_ASHMEM;
+    struct rk_ashmem_t rk_ashmem;
+    unsigned long str_size;
+
+    if(!layername)
+        return -EINVAL;
+
+    if(g_gralloc && g_gralloc->perform)
+        ret = g_gralloc->perform(g_gralloc, op, hnd, &rk_ashmem);
+    else
+        ret = -EINVAL;
+
+    if(ret != 0)
+    {
+        ALOGE("%s:cann't get value from gralloc", __FUNCTION__);
+        goto exit;
+    }
+
+    op = GRALLOC_MODULE_PERFORM_SET_RK_ASHMEM;
+
+    str_size = strlen(layername)+1;
+    str_size = str_size > sizeof(rk_ashmem.LayerName) ? sizeof(rk_ashmem.LayerName):str_size;
+    memcpy(rk_ashmem.LayerName,layername,str_size);
+
+    if(g_gralloc && g_gralloc->perform)
+        ret = g_gralloc->perform(g_gralloc, op, hnd, &rk_ashmem);
+    else
+        ret = -EINVAL;
+
+    if(ret != 0)
+    {
+        ALOGE("%s:cann't get value from gralloc", __FUNCTION__);
+    }
+
+exit:
+    return ret;
+}
+
 
 void Layer::onFirstRef() {
     // Creates a custom BufferQueue for SurfaceFlingerConsumer to use
@@ -181,6 +399,12 @@ void Layer::onFirstRef() {
     if (mFlinger->isLayerTripleBufferingDisabled()) {
         mProducer->setMaxDequeuedBufferCount(2);
     }
+ #if RK_USE_3_LAYER_BUFFER
+    else
+    {
+        mProducer->setMaxDequeuedBufferCount(3);
+    }
+ #endif
 
     const sp<const DisplayDevice> hw(mFlinger->getDefaultDisplayDevice());
     updateTransformHint(hw);
@@ -447,6 +671,14 @@ static Rect reduce(const Rect& win, const Region& exclude) {
     return Region(win).subtract(exclude).getBounds();
 }
 
+static FloatRect reduce(const FloatRect& win, const Region& exclude) {
+    if (CC_LIKELY(exclude.isEmpty())) {
+        return win;
+    }
+    // Convert through Rect (by rounding) for lack of FloatRegion
+    return Region(Rect{win}).subtract(exclude).getBounds().toFloatRect();
+}
+
 Rect Layer::computeScreenBounds(bool reduceTransparentRegion) const {
     const Layer::State& s(getDrawingState());
     Rect win(s.active.w, s.active.h);
@@ -485,12 +717,12 @@ Rect Layer::computeScreenBounds(bool reduceTransparentRegion) const {
     return win;
 }
 
-Rect Layer::computeBounds() const {
+FloatRect Layer::computeBounds() const {
     const Layer::State& s(getDrawingState());
     return computeBounds(s.activeTransparentRegion);
 }
 
-Rect Layer::computeBounds(const Region& activeTransparentRegion) const {
+FloatRect Layer::computeBounds(const Region& activeTransparentRegion) const {
     const Layer::State& s(getDrawingState());
     Rect win(s.active.w, s.active.h);
 
@@ -507,14 +739,16 @@ Rect Layer::computeBounds(const Region& activeTransparentRegion) const {
     }
 
     Transform t = getTransform();
+
+    FloatRect floatWin = win.toFloatRect();
     if (p != nullptr) {
-        win = t.transform(win);
-        win.intersect(bounds, &win);
-        win = t.inverse().transform(win);
+        floatWin = t.transform(floatWin);
+        floatWin = floatWin.intersect(bounds.toFloatRect());
+        floatWin = t.inverse().transform(floatWin);
     }
 
     // subtract the transparent region and snap to the bounds
-    return reduce(win, activeTransparentRegion);
+    return reduce(floatWin, activeTransparentRegion);
 }
 
 Rect Layer::computeInitialCrop(const sp<const DisplayDevice>& hw) const {
@@ -637,6 +871,124 @@ FloatRect Layer::computeCrop(const sp<const DisplayDevice>& hw) const {
     return crop;
 }
 
+#if RK_OPT_DVFS
+/**
+ * 标识当前是否使用 DVFS 机制优化瞬时的 GPU 性能.
+ */
+static int dvfs_stat = 0;
+
+static int openDvfsNode()
+{
+    int fd_dvfs = -1;
+
+#ifdef SF_RK3288
+        fd_dvfs = open("/sys/devices/ffa30000.gpu/dvfs", O_RDWR, 0);
+#elif SF_RK3399
+        fd_dvfs = open("/sys/devices/platform/ff9a0000.gpu/devfreq/ff9a0000.gpu/governor", O_RDWR, 0);
+#else
+        fd_dvfs = -1;
+#endif
+
+    return fd_dvfs;
+}
+
+#if SF_RK3399
+static bool shouldEnforceGpuHighPerformance()
+{
+    bool ret = false;
+
+    ssize_t numOfBytesRead = 0;
+    char bytesRead[64] = "\0";
+    char* governor;
+
+    int fd = -1; // fd_of_dvfs_node.
+
+    fd = openDvfsNode();
+    if ( fd < 0 )
+    {
+        ret = false;
+        goto EXIT;
+    }
+
+    numOfBytesRead = read(fd, bytesRead, sizeof(bytesRead) );
+    if ( numOfBytesRead <= 0 )
+    {
+        E("fail to read governor of devfreq_gpu, numOfBytesRead : %zd, err : %s.", numOfBytesRead, strerror(errno) );
+        goto EXIT;
+    }
+    D("numOfBytesRead : %zd", numOfBytesRead);
+    D_MEM(bytesRead, numOfBytesRead); // 'bytesRead' 中的有效内容以 '\n' 结尾, 而不是 '\0'.
+
+    bytesRead[numOfBytesRead - 1] = '\0';   // "- 2" : 将 "xxx'\n'" 中的 '\n' 置为 '\0'.
+    governor = bytesRead;
+    D_STR(governor);
+
+    /* 只有当前 governor 是 'simple_ondemand' 才 应该 提高 clk_gpu. */
+    if (0 == strcmp(governor, "simple_ondemand") )
+    {
+        ret = true;
+    }
+    else
+    {
+        W("should not enforce gpu high performance, for curr governor : %s", governor);
+        ret = false;
+    }
+    // .trick : 3399 系统通常使用 governor "simple_ondemand", 这里为优化性能, 将临时设置为 "performance".
+    //          其他以调试为目的的定频操作, 最好 "不要" 使用 "performance", 而使用 "userspace".
+
+EXIT:
+    if ( fd != -1 )
+    {
+        close(fd);
+    }
+    return ret;
+}
+#endif // #if SF_RK3399
+
+static void optimizationDvfs(int on) {
+    char value[30];
+    int ret = -1;
+
+    int fd = -1; // fd_of_dvfs_node.
+
+    fd = openDvfsNode();
+    if (fd< 0) {
+        ALOGV("on=%d,fd_dvfs=%d,%s", on, fd, strerror(errno));
+        return;
+    }
+
+#ifdef SF_RK3288
+    if (on) {
+        sprintf(value, "on");
+        ret = write(fd, value, sizeof(value));
+    } else {
+        sprintf(value, "off");
+        ret = write(fd, value, sizeof(value));
+    }
+#elif SF_RK3399
+    if (on) {
+        sprintf(value, "performance");
+        ret = write(fd, value, sizeof(value));
+    } else {
+        sprintf(value, "simple_ondemand");
+        ret = write(fd, value, sizeof(value));
+    }
+#else
+    sprintf(value, "nothing");
+#endif
+
+    if (ret == -1)
+        ALOGV("ret=%d,on=%d,fd_dvfs=%d,%s", ret, on, fd, strerror(errno));
+
+    if ( fd != -1 )
+    {
+        close(fd);
+    }
+
+    return;
+}
+#endif // #if RK_OPT_DVFS
+
 #ifdef USE_HWC2
 void Layer::setGeometry(const sp<const DisplayDevice>& displayDevice, uint32_t z)
 #else
@@ -674,8 +1026,13 @@ void Layer::setGeometry(
 #ifdef USE_HWC2
     auto blendMode = HWC2::BlendMode::None;
     if (!isOpaque(s) || getAlpha() != 1.0f) {
+#if !RK_USE_DRM
+        blendMode = ((mPremultipliedAlpha ?
+                HWC2::BlendMode::Premultiplied : HWC2::BlendMode::Coverage) | s.alpha<<16);
+#else
         blendMode = mPremultipliedAlpha ?
                 HWC2::BlendMode::Premultiplied : HWC2::BlendMode::Coverage;
+#endif
     }
     auto error = hwcLayer->setBlendMode(blendMode);
     ALOGE_IF(error != HWC2::Error::None, "[%s] Failed to set blend mode %s:"
@@ -683,9 +1040,15 @@ void Layer::setGeometry(
              to_string(error).c_str(), static_cast<int32_t>(error));
 #else
     if (!isOpaque(s) || getAlpha() != 0xFF) {
+#if !RK_USE_DRM
+        layer.setBlending((mPremultipliedAlpha ?
+                HWC_BLENDING_PREMULT :
+                HWC_BLENDING_COVERAGE) | s.alpha<<16);
+#else
         layer.setBlending(mPremultipliedAlpha ?
                 HWC_BLENDING_PREMULT :
                 HWC_BLENDING_COVERAGE);
+#endif
     }
 #endif
 
@@ -723,7 +1086,9 @@ void Layer::setGeometry(
                 s.active.w, activeCrop.bottom));
     }
 
-    Rect frame(t.transform(computeBounds(activeTransparentRegion)));
+    // computeBounds returns a FloatRect to provide more accuracy during the
+    // transformation. We then round upon constructing 'frame'.
+    Rect frame{t.transform(computeBounds(activeTransparentRegion))};
     if (!s.finalCrop.isEmpty()) {
         if(!frame.intersect(s.finalCrop, &frame)) {
             frame.clear();
@@ -826,9 +1191,28 @@ void Layer::setGeometry(
     const uint32_t orientation = transform.getOrientation();
 #ifdef USE_HWC2
     if (orientation & Transform::ROT_INVALID) {
+#if RK_OPT_DVFS
+        if (dvfs_stat == 0
+#if SF_RK3399
+            && shouldEnforceGpuHighPerformance()
+#endif
+        )
+        {
+            ALOGI("start forcing gpu high performance.");
+            optimizationDvfs(1);
+            dvfs_stat = 1;
+        }
+#endif
         // we can only handle simple transformation
         hwcInfo.forceClientComposition = true;
     } else {
+#if RK_OPT_DVFS
+        if (dvfs_stat == 1) {
+            ALOGI("stop forcing gpu high performance.");
+            optimizationDvfs(0);
+            dvfs_stat = 0;
+        }
+#endif
         auto transform = static_cast<HWC2::Transform>(orientation);
         auto error = hwcLayer->setTransform(transform);
         ALOGE_IF(error != HWC2::Error::None, "[%s] Failed to set transform %s: "
@@ -837,9 +1221,28 @@ void Layer::setGeometry(
     }
 #else
     if (orientation & Transform::ROT_INVALID) {
+#if RK_OPT_DVFS
+        if (dvfs_stat == 0
+#if SF_RK3399
+            && shouldEnforceGpuHighPerformance()
+#endif
+        )
+        {
+            ALOGI("start forcing gpu high performance.");
+            optimizationDvfs(1);
+            dvfs_stat = 1;
+        }
+#endif
         // we can only handle simple transformation
         layer.setSkip(true);
     } else {
+#if RK_OPT_DVFS
+        if (dvfs_stat == 1) {
+            ALOGI("stop forcing gpu high performance.");
+            optimizationDvfs(0);
+            dvfs_stat = 0;
+        }
+#endif
         layer.setTransform(orientation);
     }
 #endif
@@ -950,8 +1353,26 @@ void Layer::setPerFrameData(const sp<const DisplayDevice>& displayDevice) {
                 mActiveBuffer->handle, to_string(error).c_str(),
                 static_cast<int32_t>(error));
     }
-}
 
+#if RK_LAYER_NAME
+    set_handle_layername(mActiveBuffer->handle, getName().string());
+#endif
+#if RK_STEREO
+    set_handle_alreadyStereo(mActiveBuffer->handle, mSurfaceFlingerConsumer->getAlreadyStereo());
+    set_handle_displayStereo(mActiveBuffer->handle, 0);
+#endif
+}
+#if RK_STEREO
+void Layer::setDisplayStereo()
+{
+    if(mActiveBuffer != nullptr && mActiveBuffer->handle)
+    {
+        displayStereo = get_handle_displayStereo(mActiveBuffer->handle);
+    }
+    else
+        displayStereo = 0;
+}
+#endif
 #else
 void Layer::setPerFrameData(const sp<const DisplayDevice>& hw,
         HWComposer::HWCLayerInterface& layer) {
@@ -973,6 +1394,17 @@ void Layer::setPerFrameData(const sp<const DisplayDevice>& hw,
         // layer yet, or if we ran out of memory
         layer.setBuffer(mActiveBuffer);
     }
+#if RK_LAYER_NAME
+    layer.setLayername(getName().string());
+#endif
+#if RK_STEREO && !RK_VR
+    layer.setAlreadyStereo(mSurfaceFlingerConsumer->getAlreadyStereo());
+    layer.initDisplayStereo();
+#endif
+
+    //add this for hwc1 hdr feature.
+    //ALOGV("setPerFrameData: dataspace = %d", mCurrentState.dataSpace);
+    layer.setDataspace(mCurrentState.dataSpace);
 }
 #endif
 
@@ -1017,8 +1449,11 @@ void Layer::setAcquireFence(const sp<const DisplayDevice>& /* hw */,
 
     // TODO: there is a possible optimization here: we only need to set the
     // acquire fence the first time a new buffer is acquired on EACH display.
-
+#if RK_COMP_TYPE
+    if (layer.getCompositionType() != HWC_FRAMEBUFFER) {
+#else
     if (layer.getCompositionType() == HWC_OVERLAY || layer.getCompositionType() == HWC_CURSOR_OVERLAY) {
+#endif
         sp<Fence> fence = mSurfaceFlingerConsumer->getCurrentFence();
         if (fence->isValid()) {
             fenceFd = fence->dup();
@@ -1029,6 +1464,52 @@ void Layer::setAcquireFence(const sp<const DisplayDevice>& /* hw */,
     }
     layer.setAcquireFenceFd(fenceFd);
 }
+
+#if RK_STEREO
+void Layer::setDisplayStereo(const sp<const DisplayDevice>& /* hw */,
+        HWComposer::HWCLayerInterface& layer) {
+    displayStereo = layer.getDisplayStereo();
+}
+#endif
+
+#if RK_VR
+bool Layer::isFullScreen(const sp<const DisplayDevice>& hw,HWComposer::HWCLayerInterface& layer){
+    Rect rect;
+    layer.getFrame(rect);
+
+    float w_ratio = (float)rect.getWidth() / (float)hw->getWidth();
+    float h_ratio = (float)rect.getHeight() / (float)hw->getHeight();
+
+    //ALOGD("ljt %f %f",w_ratio,h_ratio);
+
+
+    if((1.0 == w_ratio) && (h_ratio > 0.8))
+        return true;
+    else
+        return false;
+}
+
+bool Layer::isFBRLayer(){
+    if (mActiveBuffer == NULL)
+        return false;
+
+    int64_t usage = mActiveBuffer->getUsage();
+
+    if (usage & 0x08000000)
+        return true;
+    else
+        return false;
+}
+
+void Layer::setAlreadyStereo(HWComposer::HWCLayerInterface& layer,int flag) {
+    mStereoMode = flag;
+    return layer.setAlreadyStereo(flag);
+}
+
+int Layer::getStereoModeToDraw()const{
+    return mStereoMode;
+}
+#endif
 
 Rect Layer::getPosition(
     const sp<const DisplayDevice>& hw)
@@ -1089,13 +1570,121 @@ static constexpr mat4 inverseOrientation(uint32_t transform) {
     return inverse(tr);
 }
 
+#if (RK_NV12_10_TO_NV12_BY_RGA | RK_NV12_10_TO_NV12_BY_NENO | RK_HDR)
+/* print time macros. */
+#define PRINT_TIME_START        \
+    struct timeval tpend1, tpend2;\
+    long usec1 = 0;\
+    gettimeofday(&tpend1,NULL);\
+
+#define PRINT_TIME_END(tag)        \
+    gettimeofday(&tpend2,NULL);\
+    usec1 = 1000*(tpend2.tv_sec - tpend1.tv_sec) + (tpend2.tv_usec- tpend1.tv_usec)/1000;\
+    if (property_get_bool("sys.hwc.time", 1)) \
+    ALOGD_IF(1,"%s use time=%ld ms",tag,usec1);\
+
+ #if RK_NV12_10_TO_NV12_BY_RGA
+static int rgaCopyBit(sp<GraphicBuffer> src_buf, sp<GraphicBuffer> dst_buf, const Rect& rect)
+{
+    rga_info_t src, dst;
+    int src_l,src_t,src_r,src_b,src_h,src_stride,src_format;
+    int dst_l,dst_t,dst_r,dst_b,dst_h,dst_stride,dst_format;
+    RockchipRga& mRga = RockchipRga::get();
+    int ret = 0;
+
+    memset(&src, 0, sizeof(rga_info_t));
+    memset(&dst, 0, sizeof(rga_info_t));
+    src.fd = -1;
+    dst.fd = -1;
+
+    src_stride = src_buf->getStride();
+    src_format = src_buf->getPixelFormat();
+    src_h = src_buf->getHeight();
+
+    dst_stride = dst_buf->getStride();
+    dst_format = dst_buf->getPixelFormat();
+    dst_h = dst_buf->getHeight();
+
+    dst_l = src_l = rect.left;
+    dst_t = src_t = rect.top;
+    dst_r = src_r = rect.right;
+    dst_b = src_b = rect.bottom;
+    rga_set_rect(&src.rect, src_l, src_t, src_r - src_l, src_b - src_t, src_stride, src_h, src_format);
+    rga_set_rect(&dst.rect, dst_l, dst_t, dst_buf->getWidth(), dst_buf->getHeight(), dst_stride, dst_h, dst_format);
+
+    src.hnd = src_buf->handle;
+    dst.hnd = dst_buf->handle;
+//  src.rotation = rga_transform;
+//PRINT_TIME_START
+    ret = mRga.RkRgaBlit(&src, &dst, NULL);
+//PRINT_TIME_END("rgaCopyBit")
+    if(ret) {
+        ALOGD_IF(1,"rgaCopyBit  : src[x=%d,y=%d,w=%d,h=%d,ws=%d,hs=%d,format=0x%x],dst[x=%d,y=%d,w=%d,h=%d,ws=%d,hs=%d,format=0x%x]",
+            src.rect.xoffset, src.rect.yoffset, src.rect.width, src.rect.height, src.rect.wstride, src.rect.hstride, src.rect.format,
+            dst.rect.xoffset, dst.rect.yoffset, dst.rect.width, dst.rect.height, dst.rect.wstride, dst.rect.hstride, dst.rect.format);
+        ALOGD_IF(1,"rgaCopyBit : src hnd=%p,dst hnd=%p, src_format=0x%x ==> dst_format=0x%x\n",
+            (void*)src_buf->handle, (void*)(dst_buf->handle), src_format, dst_format);
+        return ret;
+    }
+
+    return ret;
+}
+#endif
+
+#endif
+
+#if RK_HDR
+typedef unsigned char u8;
+typedef unsigned short u16;
+typedef unsigned int u32;
+typedef signed char s8;
+typedef signed short s16;
+typedef signed int s32;
+#define HDRUSAGE            0x2000000
+#define RK_XXX_PATH         "/system/lib64/librockchipxxx.so"
+typedef void (*__rockchipxxx)(u8 *src, u8 *dst, int w, int h, int srcStride, int dstStride, int area);
+
+static void* dso = NULL;
+static __rockchipxxx rockchipxxx = NULL;
+
+#elif RK_NV12_10_TO_NV12_BY_NENO
+
+typedef unsigned char u8;
+typedef unsigned short u16;
+typedef unsigned int u32;
+typedef signed char s8;
+typedef signed short s16;
+typedef signed int s32;
+#define RK_XXX_PATH         "/system/lib/librockchipxxx.so"
+typedef void (*__rockchipxxx3288)(u8 *src, u8 *dst, int w, int h, int srcStride, int dstStride, int area);
+
+static void* dso = NULL;
+static __rockchipxxx3288 rockchipxxx3288 = NULL;
+#endif
+
 /*
  * onDraw will draw the current layer onto the presentable buffer
  */
 void Layer::onDraw(const sp<const DisplayDevice>& hw, const Region& clip,
         bool useIdentityTransform) const
 {
+#if 0 //defined(EECOLOR)
+	// system\core\include\system\graphics.h
+	bool bHDR = mActiveBuffer != NULL && mActiveBuffer->getUsage() & HDRUSAGE;
+	if (mActiveBuffer->getPixelFormat() >= HAL_PIXEL_FORMAT_YCbCr_422_SP)
+	{
+		__android_log_close();
+		char szValue[PROP_VALUE_MAX + 1] = {0};
+		__system_property_get("sys.video.hdr_mode", szValue);
+		//ALOGD("%s bHDR: %u PixelFormat: %d %d sys.video.hdr_mode: %s", mName.string(), bHDR, mActiveBuffer->getPixelFormat(), mFormat, szValue);
+
+		// DT: TEMP App needs to turn this on/off when video starts/stops
+		__system_property_set("sys.video.hdr_mode", mActiveBuffer->getUsage() & HDRUSAGE ? "hdr_effect" : "sdr_effect");
+	}
+#endif
+
     ATRACE_CALL();
+    RenderEngine& engine(mFlinger->getRenderEngine());
 
     if (CC_UNLIKELY(mActiveBuffer == 0)) {
         // the texture has not been created yet, this Layer has
@@ -1126,7 +1715,136 @@ void Layer::onDraw(const sp<const DisplayDevice>& hw, const Region& clip,
 
     // Bind the current buffer to the GL texture, and wait for it to be
     // ready for us to draw into.
-    status_t err = mSurfaceFlingerConsumer->bindTextureImage();
+    status_t err = NO_ERROR;
+#if (RK_NV12_10_TO_NV12_BY_RGA | RK_NV12_10_TO_NV12_BY_NENO | RK_HDR)
+    if(mActiveBuffer != NULL &&
+       mActiveBuffer->getPixelFormat() == HAL_PIXEL_FORMAT_YCrCb_NV12_10 )
+    {
+#if RK_HDR
+        const int yuvTexUsage = GraphicBuffer::USAGE_HW_TEXTURE | GRALLOC_USAGE_TO_USE_ARM_P010;
+        const int yuvTexFormat = HAL_PIXEL_FORMAT_YCrCb_NV12_10;
+#elif (RK_NV12_10_TO_NV12_BY_NENO | RK_NV12_10_TO_NV12_BY_RGA)
+        const int yuvTexUsage = GraphicBuffer::USAGE_HW_TEXTURE;
+        const int yuvTexFormat = HAL_PIXEL_FORMAT_YCrCb_NV12;
+#endif
+        static int yuvcnt;
+        int yuvIndex ;
+        yuvcnt ++;
+        yuvIndex = yuvcnt%2;
+#if (RK_HDR | RK_NV12_10_TO_NV12_BY_NENO)
+        int src_l,src_t,src_r,src_b,src_stride;
+        void *src_vaddr;
+        void *dst_vaddr;
+        src_l = mCurrentCrop.left;
+        src_t = mCurrentCrop.top;
+        src_r = mCurrentCrop.right;
+        src_b = mCurrentCrop.bottom;
+        src_stride = mActiveBuffer->getStride();
+        uint32_t w = src_r - src_l;
+#elif RK_NV12_10_TO_NV12_BY_RGA
+        //Since rga cann't support scalet to bigger than 4096 limit to 4096
+        uint32_t w = (mCurrentCrop.getWidth() + 31) & (~31);
+#endif
+        if((yuvTeximg[yuvIndex].yuvTexBuffer != NULL) &&
+                   (yuvTeximg[yuvIndex].yuvTexBuffer->getWidth() != w ||
+                    yuvTeximg[yuvIndex].yuvTexBuffer->getHeight() != mActiveBuffer->getHeight()))
+        {
+            yuvTeximg[yuvIndex].yuvTexBuffer = NULL;
+            eglDestroyImageKHR(hw->getEglDisplay(), yuvTeximg[yuvIndex].img);
+        }
+        if(yuvTeximg[yuvIndex].yuvTexBuffer == NULL)
+        {
+            yuvTeximg[yuvIndex].yuvTexBuffer = new GraphicBuffer(w, mActiveBuffer->getHeight(),
+                                             yuvTexFormat, yuvTexUsage);
+            EGLClientBuffer clientBuffer = (EGLClientBuffer)yuvTeximg[yuvIndex].yuvTexBuffer->getNativeBuffer();
+            yuvTeximg[yuvIndex].img = eglCreateImageKHR(hw->getEglDisplay(), EGL_NO_CONTEXT, EGL_NATIVE_BUFFER_ANDROID,
+                                clientBuffer, 0);
+            if (yuvTeximg[yuvIndex].img == EGL_NO_IMAGE_KHR) {
+                ALOGE("%s:line=%d,EGL_NO_IMAGE_KHR",__FUNCTION__,__LINE__);
+                return ;
+            }
+        }
+
+#if (RK_HDR | RK_NV12_10_TO_NV12_BY_NENO)
+        mActiveBuffer->lock(GRALLOC_USAGE_SW_READ_OFTEN,&src_vaddr);
+        yuvTeximg[yuvIndex].yuvTexBuffer->lock(GRALLOC_USAGE_SW_WRITE_OFTEN,&dst_vaddr);
+
+        //PRINT_TIME_START
+        if(dso == NULL)
+            dso = dlopen(RK_XXX_PATH, RTLD_NOW | RTLD_LOCAL);
+
+        if (dso == 0) {
+            ALOGE("rk_debug can't not find /system/lib64/librockchipxxx.so ! error=%s \n",
+                dlerror());
+            return;
+        }
+#if RK_HDR
+        if(rockchipxxx == NULL)
+            rockchipxxx = (__rockchipxxx)dlsym(dso, "_Z11rockchipxxxPhS_iiiii");
+        if(rockchipxxx == NULL)
+        {
+            ALOGE("rk_debug can't not find target function in /system/lib64/librockchipxxx.so ! \n");
+            dlclose(dso);
+            return;
+        }
+        rockchipxxx((u8*)src_vaddr, (u8*)dst_vaddr, src_r - src_l, src_b - src_t, src_stride, (src_r - src_l)*2, 0);
+#elif RK_NV12_10_TO_NV12_BY_NENO
+        if(rockchipxxx3288 == NULL)
+            rockchipxxx3288 = (__rockchipxxx3288)dlsym(dso, "_Z15rockchipxxx3288PhS_iiiii");
+        if(rockchipxxx3288 == NULL)
+        {
+            ALOGE("rk_debug can't not find target function in /system/lib64/librockchipxxx.so ! \n");
+            dlclose(dso);
+            return;
+        }
+        rockchipxxx3288((u8*)src_vaddr, (u8*)dst_vaddr, src_r - src_l, src_b - src_t, src_stride, (src_r - src_l), 0);
+#endif
+        //PRINT_TIME_END("convert10to16_highbit_arm64_neon")
+        ALOGV("src_vaddr=%p,dst_vaddr=%p,crop_w=%d,crop_h=%d,stride=%f, src_stride=%d,raw_w=%d,raw_h=%d",
+                src_vaddr, dst_vaddr, src_r - src_l,src_b - src_t,
+                (src_r - src_l)*1.25+64,src_stride,mActiveBuffer->getWidth(),mActiveBuffer->getHeight());
+    //dump data
+    static int i =0;
+    char pro_value[PROPERTY_VALUE_MAX];
+
+    property_get("sys.dump_out_neon",pro_value,0);
+    if(i<10 && !strcmp(pro_value,"true"))
+    {
+        char data_name[100];
+
+        sprintf(data_name,"/data/dump/dmlayer%d_%d_%d.bin", i,
+                yuvTeximg[yuvIndex].yuvTexBuffer->getWidth(),yuvTeximg[yuvIndex].yuvTexBuffer->getHeight());
+#if RK_HDR
+        int n = yuvTeximg[yuvIndex].yuvTexBuffer->getHeight() * yuvTeximg[yuvIndex].yuvTexBuffer->getStride();
+#else
+        int n = yuvTeximg[yuvIndex].yuvTexBuffer->getHeight() * yuvTeximg[yuvIndex].yuvTexBuffer->getStride() * 1.5;
+#endif
+        ALOGD("dump %s size=%d", data_name, n );
+        FILE *fp;
+        if ((fp = fopen(data_name, "w+")) == NULL)
+        {
+            printf("can't open output.bin!!!!!\n");
+        }
+        fwrite(dst_vaddr, n, 1, fp);
+        fclose(fp);
+        i++;
+    }
+#elif RK_NV12_10_TO_NV12_BY_RGA
+        rgaCopyBit(mActiveBuffer, yuvTeximg[yuvIndex].yuvTexBuffer, mCurrentCrop);
+#endif
+        if (yuvTeximg[yuvIndex].img == EGL_NO_IMAGE_KHR) {
+            ALOGE("%s:line=%d,EGL_NO_IMAGE_KHR",__FUNCTION__,__LINE__);
+            return ;
+        }
+
+        engine.bindyuvimg(yuvTeximg[yuvIndex].img, mTextureName);
+        ALOGV("glEGLImageTargetTexture2DOES,index=%d,img=%p,name=%d",yuvIndex,yuvTeximg[yuvIndex].img,mTextureName);
+    }
+    else
+#endif
+    {
+        err = mSurfaceFlingerConsumer->bindTextureImage();
+    }
     if (err != NO_ERROR) {
         ALOGW("onDraw: bindTextureImage failed (err=%d)", err);
         // Go ahead and draw the buffer anyway; no matter what we do the screen
@@ -1134,8 +1852,9 @@ void Layer::onDraw(const sp<const DisplayDevice>& hw, const Region& clip,
     }
 
     bool blackOutLayer = isProtected() || (isSecure() && !hw->isSecure());
-
-    RenderEngine& engine(mFlinger->getRenderEngine());
+#if RK_BLACK_NV12_10_LAYER
+    blackOutLayer = blackOutLayer || (mActiveBuffer->getPixelFormat()== HAL_PIXEL_FORMAT_YCrCb_NV12_10);
+#endif
 
     if (!blackOutLayer) {
         // TODO: we could be more subtle with isFixedSize()
@@ -1189,6 +1908,119 @@ void Layer::onDraw(const sp<const DisplayDevice>& hw, const Region& clip,
     engine.disableTexturing();
 }
 
+#if RK_STEREO
+void setStereoDraw(const sp<const DisplayDevice>& hw, RenderEngine& engine,
+     Mesh& mMesh, int alreadyStereo, int displayStereo)
+{
+    Mesh::VertexArray<vec2> position(mMesh.getPositionArray<vec2>());
+
+    if(1==displayStereo && !alreadyStereo) {
+        position[0].x /= 2;
+        position[1].x /= 2;
+        position[2].x /= 2;
+        position[3].x /= 2;
+        engine.drawMesh(mMesh);
+
+        position[0].x += (hw->getWidth()/2);
+        position[1].x += (hw->getWidth()/2);
+        position[2].x += (hw->getWidth()/2);
+        position[3].x += (hw->getWidth()/2);
+    }
+
+    if(2==displayStereo && !alreadyStereo) {
+        position[0].y /= 2;
+        position[1].y /= 2;
+        position[2].y /= 2;
+        position[3].y /= 2;
+        engine.drawMesh(mMesh);
+
+        position[0].y += (hw->getHeight()/2);
+        position[1].y += (hw->getHeight()/2);
+        position[2].y += (hw->getHeight()/2);
+        position[3].y += (hw->getHeight()/2);
+    }
+}
+#endif
+
+#if RK_VR
+void setStereoDrawVR(const sp<const DisplayDevice>& hw, RenderEngine& engine,
+     Mesh& mMesh, int alreadyStereo, int displayStereo)
+{
+    char value[PROPERTY_VALUE_MAX];
+    property_get("sys.vr.ipd", value, "0.08");
+    float ipd = atof(value);
+
+    Mesh::VertexArray<vec2> position(mMesh.getPositionArray<vec2>());
+
+    if(1==displayStereo && !alreadyStereo) {
+        position[0].x /= 2;
+        position[1].x /= 2;
+        position[2].x /= 2;
+        position[3].x /= 2;
+
+        position[0].y /= 2;
+        position[1].y /= 2;
+        position[2].y /= 2;
+        position[3].y /= 2;
+
+        position[0].x += (ipd*hw->getWidth()/4);
+        position[1].x += (ipd*hw->getWidth()/4);
+        position[2].x += (ipd*hw->getWidth()/4);
+        position[3].x += (ipd*hw->getWidth()/4);
+
+        position[0].y += (hw->getHeight()/4);
+        position[1].y += (hw->getHeight()/4);
+        position[2].y += (hw->getHeight()/4);
+        position[3].y += (hw->getHeight()/4);
+
+        engine.drawMesh(mMesh);
+
+        position[0].x -= (ipd*hw->getWidth()/2);
+        position[1].x -= (ipd*hw->getWidth()/2);
+        position[2].x -= (ipd*hw->getWidth()/2);
+        position[3].x -= (ipd*hw->getWidth()/2);
+
+        position[0].x += (hw->getWidth()/2);
+        position[1].x += (hw->getWidth()/2);
+        position[2].x += (hw->getWidth()/2);
+        position[3].x += (hw->getWidth()/2);
+    }
+
+    if(2==displayStereo && !alreadyStereo) {
+        position[0].y /= 2;
+        position[1].y /= 2;
+        position[2].y /= 2;
+        position[3].y /= 2;
+
+        position[0].x /= 2;
+        position[1].x /= 2;
+        position[2].x /= 2;
+        position[3].x /= 2;
+
+        position[0].y += (ipd*hw->getHeight()/4);
+        position[1].y += (ipd*hw->getHeight()/4);
+        position[2].y += (ipd*hw->getHeight()/4);
+        position[3].y += (ipd*hw->getHeight()/4);
+
+        position[0].x += (hw->getWidth()/4);
+        position[1].x += (hw->getWidth()/4);
+        position[2].x += (hw->getWidth()/4);
+        position[3].x += (hw->getWidth()/4);
+
+        engine.drawMesh(mMesh);
+
+        position[0].y -= (ipd*hw->getHeight()/2);
+        position[1].y -= (ipd*hw->getHeight()/2);
+        position[2].y -= (ipd*hw->getHeight()/2);
+        position[3].y -= (ipd*hw->getHeight()/2);
+
+        position[0].y += (hw->getHeight()/2);
+        position[1].y += (hw->getHeight()/2);
+        position[2].y += (hw->getHeight()/2);
+        position[3].y += (hw->getHeight()/2);
+    }
+}
+#endif
 
 void Layer::clearWithOpenGL(const sp<const DisplayDevice>& hw,
         float red, float green, float blue,
@@ -1197,6 +2029,15 @@ void Layer::clearWithOpenGL(const sp<const DisplayDevice>& hw,
     RenderEngine& engine(mFlinger->getRenderEngine());
     computeGeometry(hw, mMesh, false);
     engine.setupFillWithColor(red, green, blue, alpha);
+
+#if RK_VR
+    setStereoDrawVR(hw, engine, mMesh,
+        mSurfaceFlingerConsumer->getAlreadyStereo()/*getStereoModeToDraw()*/, displayStereo);
+#elif RK_STEREO
+    setStereoDraw(hw, engine, mMesh,
+        mSurfaceFlingerConsumer->getAlreadyStereo(), displayStereo);
+#endif
+
     engine.drawMesh(mMesh);
 }
 
@@ -1225,16 +2066,17 @@ void Layer::drawWithOpenGL(const sp<const DisplayDevice>& hw,
      * minimal value)? Or, we could make GL behave like HWC -- but this feel
      * like more of a hack.
      */
-    Rect win(computeBounds());
+    const Rect bounds{computeBounds()}; // Rounds from FloatRect
 
     Transform t = getTransform();
+    Rect win = bounds;
     if (!s.finalCrop.isEmpty()) {
         win = t.transform(win);
         if (!win.intersect(s.finalCrop, &win)) {
             win.clear();
         }
         win = t.inverse().transform(win);
-        if (!win.intersect(computeBounds(), &win)) {
+        if (!win.intersect(bounds, &win)) {
             win.clear();
         }
     }
@@ -1253,12 +2095,45 @@ void Layer::drawWithOpenGL(const sp<const DisplayDevice>& hw,
     texCoords[3] = vec2(right, 1.0f - top);
 
     RenderEngine& engine(mFlinger->getRenderEngine());
+
     engine.setupLayerBlending(mPremultipliedAlpha, isOpaque(s), getAlpha());
 #ifdef USE_HWC2
     engine.setSourceDataSpace(mCurrentState.dataSpace);
 #endif
+
+#if RK_HDR
+    if(mActiveBuffer->getPixelFormat() == HAL_PIXEL_FORMAT_YCrCb_NV12_10
+        && ((mActiveBuffer->getUsage() & 0x0F000000) == HDRUSAGE)) {
+        engine.setupHdr(true);
+        engine.setupMRatioTexturing();
+    }
+#endif
+
+
+#if RK_VR
+    setStereoDrawVR(hw, engine, mMesh,
+        mSurfaceFlingerConsumer->getAlreadyStereo()/*getStereoModeToDraw()*/, displayStereo);
+#elif RK_STEREO
+    setStereoDraw(hw, engine, mMesh,
+        mSurfaceFlingerConsumer->getAlreadyStereo(), displayStereo);
+#endif
+
+#if defined(EECOLOR)
+		if ((mActiveBuffer->getUsage() & 0x0F000000) == HDRUSAGE)
+		{
+			gbUseEEColorShader = true;
+		}
+#endif
+
     engine.drawMesh(mMesh);
+
+#if defined(EECOLOR)
+		gbUseEEColorShader = false;
+#endif
     engine.disableBlending();
+#if RK_HDR
+    engine.setupHdr(false);
+#endif
 }
 
 #ifdef USE_HWC2
@@ -1438,9 +2313,26 @@ void Layer::computeGeometry(const sp<const DisplayDevice>& hw, Mesh& mesh,
         bool useIdentityTransform) const
 {
     const Layer::State& s(getDrawingState());
+
+#if RK_HW_ROTATION
+    Transform hwTransform(hw->getTransform());
+    const Transform identity;
+#else
     const Transform hwTransform(hw->getTransform());
-    const uint32_t hw_h = hw->getHeight();
-    Rect win = computeBounds();
+#endif
+    uint32_t hw_h = hw->getHeight();
+
+    FloatRect win = computeBounds();
+
+    D("mDrawingScreenshot : %d, useIdentityTransform : %d; hw_h : %u.",
+      mDrawingScreenshot,
+      useIdentityTransform,
+      hw_h);
+#if RK_HW_ROTATION
+    if (mDrawingScreenshot) {
+        computeHWGeometry(hwTransform, identity, hw);
+    }
+#endif
 
     vec2 lt = vec2(win.left, win.top);
     vec2 lb = vec2(win.left, win.bottom);
@@ -1471,6 +2363,56 @@ void Layer::computeGeometry(const sp<const DisplayDevice>& hw, Mesh& mesh,
         position[i].y = hw_h - position[i].y;
     }
 }
+
+#if RK_HW_ROTATION
+void Layer::computeHWGeometry(Transform& tr,
+                              const Transform& layerTransform,
+                              const sp<const DisplayDevice>& hw) const
+{
+    int hwrotation = mFlinger->getHardwareOrientation();
+    int hw_offset = hw->getWidth() - hw->getHeight();
+
+    if (hwrotation == DisplayState::eOrientation90) {
+        // 90 degree
+        tr = hw->getTransform(false) * layerTransform;
+        switch (hw->getHardwareRotation()){
+        case 0:
+            tr.set(tr.tx(), tr.ty());
+            break;
+        case 1:
+            tr.set(tr.tx(), tr.ty()-hw_offset);
+            break;
+        case 2:
+            tr.set(tr.tx()-hw_offset, tr.ty()-hw_offset);
+            break;
+        case 3:
+            tr.set(tr.tx()-hw_offset, tr.ty());
+            break;
+        }
+    } else if (hwrotation == DisplayState::eOrientation180) {
+        // 180 degree
+        tr = hw->getTransform(false) * layerTransform;
+        tr.set(tr.tx(), tr.ty());
+    } else if (hwrotation == DisplayState::eOrientation270) {
+        // 270 degree
+        tr = hw->getTransform(false) * layerTransform;
+        switch (hw->getHardwareRotation()){
+        case 0:
+            tr.set(tr.tx()-hw_offset, tr.ty()-hw_offset);
+            break;
+        case 1:
+            tr.set(tr.tx()-hw_offset, tr.ty());
+            break;
+        case 2:
+            tr.set(tr.tx(), tr.ty());
+            break;
+        case 3:
+            tr.set(tr.tx(), tr.ty()-hw_offset);
+            break;
+        }
+    }
+}
+#endif
 
 bool Layer::isOpaque(const Layer::State& s) const
 {
@@ -1781,6 +2723,12 @@ bool Layer::setPosition(float x, float y, bool immediate) {
     if (mCurrentState.requested.transform.tx() == x && mCurrentState.requested.transform.ty() == y)
         return false;
     mCurrentState.sequence++;
+
+    if (x > 117440511)
+        x = 117440511;
+
+    if (y > 117440511)
+        y = 117440511;
 
     // We update the requested and active position simultaneously because
     // we want to apply the position portion of the transform matrix immediately,

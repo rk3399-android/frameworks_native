@@ -56,6 +56,10 @@ void Description::setTexture(const Texture& texture) {
     mTextureEnabled = true;
 }
 
+void Description::setMRatioTexture(const Texture& texture) {
+    mMRatioTexture = texture;
+}
+
 void Description::disableTexture() {
     mTextureEnabled = false;
 }
@@ -83,6 +87,10 @@ const mat4& Description::getColorMatrix() const {
 
 void Description::setWideGamut(bool wideGamut) {
     mIsWideGamut = wideGamut;
+}
+
+void Description::setHdr(bool deformstus ) {
+    mHdr = deformstus;
 }
 
 } /* namespace android */

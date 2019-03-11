@@ -27,6 +27,7 @@
 #include <utils/String8.h>
 #include <utils/Timers.h>
 
+#include <ui/FloatRect.h>
 #include <ui/FrameStats.h>
 #include <ui/GraphicBuffer.h>
 #include <ui/PixelFormat.h>
@@ -85,7 +86,13 @@ public:
     // have a stable sort order when their layer stack and Z-order are
     // the same.
     int32_t sequence;
+#if RK_STEREO
+    int32_t displayStereo;
+#endif
 
+#if RK_VR
+    mutable int mStereoMode;
+#endif
     enum { // flags for doTransaction()
         eDontUpdateGeometryState = 0x00000001,
         eVisibleRegion = 0x00000002,
@@ -257,8 +264,13 @@ public:
 
     void computeGeometry(const sp<const DisplayDevice>& hw, Mesh& mesh,
             bool useIdentityTransform) const;
-    Rect computeBounds(const Region& activeTransparentRegion) const;
-    Rect computeBounds() const;
+    FloatRect computeBounds(const Region& activeTransparentRegion) const;
+    FloatRect computeBounds() const;
+
+#if RK_HW_ROTATION
+    void setDrawingScreenshot(bool drawScreenshot) { mDrawingScreenshot = drawScreenshot; };
+    void computeHWGeometry(Transform& tr, const Transform& layerTransform, const sp<const DisplayDevice>& hw) const;
+#endif
 
     int32_t getSequence() const { return sequence; }
 
@@ -320,6 +332,9 @@ public:
     void setGeometry(const sp<const DisplayDevice>& displayDevice, uint32_t z);
     void forceClientComposition(int32_t hwcId);
     void setPerFrameData(const sp<const DisplayDevice>& displayDevice);
+#if RK_STEREO
+    void setDisplayStereo();
+#endif
 
     // callIntoHwc exists so we can update our local state and call
     // acceptDisplayChanges without unnecessarily updating the device's state
@@ -338,7 +353,18 @@ public:
             HWComposer::HWCLayerInterface& layer);
     void setAcquireFence(const sp<const DisplayDevice>& hw,
             HWComposer::HWCLayerInterface& layer);
+#if RK_STEREO
+    void setDisplayStereo(const sp<const DisplayDevice>& hw,
+            HWComposer::HWCLayerInterface& layer);
+#endif
 
+#if RK_VR
+    bool isFullScreen(const sp<const DisplayDevice>& hw,
+            HWComposer::HWCLayerInterface& layer);
+    bool isFBRLayer();
+    int getStereoModeToDraw()const;
+    void setAlreadyStereo(HWComposer::HWCLayerInterface& layer,int flag);
+#endif
     Rect getPosition(const sp<const DisplayDevice>& hw);
 #endif
 
@@ -793,6 +819,9 @@ private:
     Vector<BufferItem> mQueueItems;
     std::atomic<uint64_t> mLastFrameNumberReceived;
     bool mUpdateTexImageFailed; // This is only accessed on the main thread.
+#if RK_HW_ROTATION
+    bool mDrawingScreenshot;
+#endif
 
     bool mAutoRefresh;
     bool mFreezeGeometryUpdates;

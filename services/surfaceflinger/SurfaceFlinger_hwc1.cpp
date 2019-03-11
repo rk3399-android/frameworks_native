@@ -86,6 +86,11 @@
 #include <android/hardware/configstore/1.0/ISurfaceFlingerConfigs.h>
 #include <configstore/Utils.h>
 
+#if defined(EECOLOR)
+#include "eeColorAPI/eeColorAPI.h"
+extern eeColor::APIFunctions gEEColorAPIFunctions;
+#endif
+
 #define DISPLAY_COUNT       1
 
 /*
@@ -119,6 +124,9 @@ int64_t SurfaceFlinger::maxFrameBufferAcquiredBuffers;
 
 SurfaceFlinger::SurfaceFlinger()
     :   BnSurfaceComposer(),
+#if RK_HW_ROTATION
+        mHardwareOrientation(0),
+#endif
         mTransactionFlags(0),
         mTransactionPending(false),
         mAnimTransactionPending(false),
@@ -145,6 +153,9 @@ SurfaceFlinger::SurfaceFlinger()
         mPrimaryHWVsyncEnabled(false),
         mHWVsyncAvailable(false),
         mDaltonize(false),
+#if RK_DELAY_FOR_CAPTURE
+        mDelayFlag(0),
+#endif
         mHasColorMatrix(false),
         mHasPoweredOff(false),
         mFrameBuckets(),
@@ -175,9 +186,13 @@ SurfaceFlinger::SurfaceFlinger()
     useHwcForRgbToYuv = getBool< ISurfaceFlingerConfigs,
             &ISurfaceFlingerConfigs::useHwcForRGBtoYUV>(false);
 
+#if RK_USE_3_FB
+    maxFrameBufferAcquiredBuffers = getInt64< ISurfaceFlingerConfigs,
+            &ISurfaceFlingerConfigs::maxFrameBufferAcquiredBuffers>(3);
+#else
     maxFrameBufferAcquiredBuffers = getInt64< ISurfaceFlingerConfigs,
             &ISurfaceFlingerConfigs::maxFrameBufferAcquiredBuffers>(2);
-
+#endif
     char value[PROPERTY_VALUE_MAX];
 
     property_get("ro.bq.gpu_to_cpu_unsupported", value, "0");
@@ -194,6 +209,45 @@ SurfaceFlinger::SurfaceFlinger()
             mDebugDDMS = 0;
         }
     }
+
+#if RK_FPS
+    memset(value,0,PROPERTY_VALUE_MAX);
+    property_get("debug.sf.fps", value, "0");
+    mDebugFPS = atoi(value);
+#endif
+
+#if RK_HW_ROTATION
+    memset(value,0,PROPERTY_VALUE_MAX);
+
+    /**
+     * .DP : original_display : 
+     *      原始状态的 display, 长度, 高度, orientation 等配置, 由 kernel 层的对应 device 指定. 
+     *
+     * .DP : display_pre_rotation_extension; pre_rotation; pre_rotated_display, display_saw_by_sf_clients :
+     *      display_pre_rotation_extension 是 对 android 框架的扩展, 可以实现对 primary_display 的预旋转 (pre_rotation).  
+     *      pre_rotation 之后, sf(surface_flinger) 的 client (boot_animation, window_manager_service, ...) 看到的 primary_display, 
+     *      将是预旋转之后的 display, 记为 pre_rotated_display 或 display_saw_by_sf_clients. 
+     *      设备开发人员可以通过 属性 "ro.sf.hwrotation", 来配置 pre_rotation 的具体角度, 参见对 property_hwrotation 的说明. 
+     *      本扩展目前仅对 primary_display 有效. 
+     */
+
+    /**
+     * .DP : ro.sf.hwrotation, property_hwrotation : 
+     *      display_pre_rotation_extension 引入的, 系统预定义的 ro property, 定义在文件 /system/build.prop 中. 
+     *      用来描述希望在 original_display 上执行的 预旋转(pre_rotation) 在 顺时针方向上的 角度.
+     *      可能的取值是 0, 90, 180, 270.
+     */
+    // 读取 property_hwrotation, 并设置 orientation_of_pre_rotated_display.
+    property_get("ro.sf.hwrotation", value, "0");
+    mHardwareOrientation = atoi(value) / 90;
+#endif
+
+#if RK_WFD_OPT
+    memset(value,0,PROPERTY_VALUE_MAX);
+    property_get("sys.enable.wfd.optimize", value, "0");
+    mWfdOptimize = atoi(value);
+#endif
+
     ALOGI_IF(mDebugRegion, "showupdates enabled");
     ALOGI_IF(mDebugDDMS, "DDMS debugging enabled");
 
@@ -201,7 +255,11 @@ SurfaceFlinger::SurfaceFlinger()
     mUseHwcVirtualDisplays = atoi(value);
     ALOGI_IF(!mUseHwcVirtualDisplays, "Enabling HWC virtual displays");
 
+#if RK_USE_3_LAYER_BUFFER
+    property_get("ro.sf.disable_triple_buffer", value, "0");
+#else
     property_get("ro.sf.disable_triple_buffer", value, "1");
+#endif
     mLayerTripleBufferingDisabled = atoi(value);
     ALOGI_IF(mLayerTripleBufferingDisabled, "Disabling Triple Buffering");
 }
@@ -567,7 +625,12 @@ void SurfaceFlinger::init() {
             sp<DisplayDevice> hw = new DisplayDevice(this,
                     type, hwcId, mHwc->getFormat(hwcId), isSecure, token,
                     fbs, producer,
-                    mRenderEngine->getEGLConfig(), false);
+                    mRenderEngine->getEGLConfig(),
+#if !RK_VR & RK_HW_ROTATION
+                    mHardwareOrientation,
+#endif
+                    false);
+
             if (i > DisplayDevice::DISPLAY_PRIMARY) {
                 // FIXME: currently we don't get blank/unblank requests
                 // for displays other than the main display, so we always
@@ -633,6 +696,26 @@ size_t SurfaceFlinger::getMaxViewportDims() const {
 
 // ----------------------------------------------------------------------------
 
+#if RK_FPS
+void SurfaceFlinger::debugShowFPS() const
+{
+    static int mFrameCount;
+    static int mLastFrameCount = 0;
+    static nsecs_t mLastFpsTime = 0;
+    static float mFps = 0;
+
+    mFrameCount++;
+    nsecs_t now = systemTime();
+    nsecs_t diff = now - mLastFpsTime;
+    if (diff > ms2ns(500)) {
+        mFps =  ((mFrameCount - mLastFrameCount) * float(s2ns(1))) / diff;
+        mLastFpsTime = now;
+        mLastFrameCount = mFrameCount;
+        ALOGD("mFps = %2.3f", mFps);
+    }
+}
+#endif
+
 bool SurfaceFlinger::authenticateSurfaceTexture(
         const sp<IGraphicBufferProducer>& bufferProducer) const {
     Mutex::Autolock _l(mStateLock);
@@ -666,8 +749,16 @@ status_t SurfaceFlinger::getDisplayConfigs(const sp<IBinder>& display,
         return BAD_VALUE;
     }
 
-    int32_t type = getDisplayType(display);
+    int32_t type = getDisplayType(display); // current_display_type.
     if (type < 0) return type;
+
+#if RK_HW_ROTATION
+    const HWComposer& hwc(getHwComposer());
+    float xdpi = 0.0;
+    float ydpi = 0.0;
+    xdpi = hwc.getDpiX(type);
+    ydpi = hwc.getDpiY(type);
+#endif
 
     // TODO: Not sure if display density should handled by SF any longer
     class Density {
@@ -688,14 +779,19 @@ status_t SurfaceFlinger::getDisplayConfigs(const sp<IBinder>& display,
 
     configs->clear();
 
-    const Vector<HWComposer::DisplayConfig>& hwConfigs =
+    const Vector<HWComposer::DisplayConfig>& hwConfigs = // hwc_display_config_list
             getHwComposer().getConfigs(type);
     for (size_t c = 0; c < hwConfigs.size(); ++c) {
-        const HWComposer::DisplayConfig& hwConfig = hwConfigs[c];
-        DisplayInfo info = DisplayInfo();
+        const HWComposer::DisplayConfig& hwConfig = hwConfigs[c]; // current_hwc_display_config
+        DisplayInfo info = DisplayInfo(); // current_display_info
 
         float xdpi = hwConfig.xdpi;
         float ydpi = hwConfig.ydpi;
+
+#if RK_HW_ROTATION
+        info.w = hwConfig.width;
+        info.h = hwConfig.height;
+#endif
 
         if (type == DisplayDevice::DISPLAY_PRIMARY) {
             // The density of the device is provided by a build property
@@ -716,6 +812,17 @@ status_t SurfaceFlinger::getDisplayConfigs(const sp<IBinder>& display,
             // TODO: this needs to go away (currently needed only by webkit)
             sp<const DisplayDevice> hw(getDefaultDisplayDevice());
             info.orientation = hw->getOrientation();
+
+#if RK_HW_ROTATION
+            /* 若 display_saw_by_sf_clients 和 original_display 的 宽高信息要对调, 则... */
+            if (orientationSwap())
+            {
+                xdpi = hwc.getDpiY(type);
+                ydpi = hwc.getDpiX(type);
+                info.w = hwc.getHeight(type);
+                info.h = hwc.getWidth(type);
+            }
+#endif
         } else {
             // TODO: where should this value come from?
             static const int TV_DENSITY = 213;
@@ -723,8 +830,10 @@ status_t SurfaceFlinger::getDisplayConfigs(const sp<IBinder>& display,
             info.orientation = 0;
         }
 
+#if !RK_HW_ROTATION
         info.w = hwConfig.width;
         info.h = hwConfig.height;
+#endif
         info.xdpi = xdpi;
         info.ydpi = ydpi;
         info.fps = float(1e9 / hwConfig.refresh);
@@ -1092,6 +1201,13 @@ void SurfaceFlinger::eventControl(int disp, int event, int enabled) {
 
 void SurfaceFlinger::onMessageReceived(int32_t what) {
     ATRACE_CALL();
+#if RK_DELAY_FOR_CAPTURE
+    if(mDelayFlag) {
+        usleep(20000);
+        mDelayFlag = 0;
+    }
+#endif
+
     switch (what) {
         case MessageQueue::INVALIDATE: {
             bool refreshNeeded = handleMessageTransaction();
@@ -1126,6 +1242,10 @@ bool SurfaceFlinger::handleMessageInvalidate() {
     return handlePageFlip();
 }
 
+#if RK_FPS
+static int gsFrameCcount = 0;
+#endif
+
 void SurfaceFlinger::handleMessageRefresh() {
     ATRACE_CALL();
 
@@ -1137,6 +1257,15 @@ void SurfaceFlinger::handleMessageRefresh() {
     doDebugFlashRegions();
     doComposition();
     postComposition(refreshStartTime);
+
+#if RK_FPS
+    if(gsFrameCcount++%300==0) {
+        gsFrameCcount = 1;
+        char value[PROPERTY_VALUE_MAX];
+        property_get("debug.sf.fps", value, "0");
+        mDebugFPS = atoi(value);
+    }
+#endif
 }
 
 void SurfaceFlinger::doDebugFlashRegions()
@@ -1368,9 +1497,15 @@ void SurfaceFlinger::rebuildLayerStacks() {
                         Region drawRegion(tr.transform(
                                 layer->visibleNonTransparentRegion));
                         drawRegion.andSelf(bounds);
+#if RK_VR
+                        if (!drawRegion.isEmpty() && !strstr(layer->getName().string(),"Sprite")) {
+                            layersSortedByZ.add(layer);
+                        }
+#else
                         if (!drawRegion.isEmpty()) {
                             layersSortedByZ.add(layer);
                         }
+#endif
                     }
                 });
             }
@@ -1439,6 +1574,75 @@ void SurfaceFlinger::setUpHWComposer() {
             }
         }
 
+#if RK_VR
+        // vr : detect whether contain FBR layer
+        bool hasFBRLayer = false;
+        for (size_t dpy=0 ; dpy<mDisplays.size() ; dpy++) {
+            sp<const DisplayDevice> hw(mDisplays[dpy]);
+            const int32_t id = hw->getHwcDisplayId();
+            if (id >= 0) {
+                const Vector< sp<Layer> >& currentLayers(
+                    hw->getVisibleLayersSortedByZ());
+                const size_t count = currentLayers.size();
+                HWComposer::LayerListIterator cur = hwc.begin(id);
+                const HWComposer::LayerListIterator end = hwc.end(id);
+                for (size_t i=0 ; cur!=end && i<count ; ++i, ++cur) {
+                    const sp<Layer>& layer(currentLayers[i]);
+                    if(layer->isFBRLayer()){
+                        hasFBRLayer = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        // if no FBR, whether has layer that is not _FORCE_TO_DUAL_
+        bool hasNoForceDualUI = false;
+        if(!hasFBRLayer){
+            for (size_t dpy=0 ; dpy<mDisplays.size() ; dpy++) {
+                sp<const DisplayDevice> hw(mDisplays[dpy]);
+                const int32_t id = hw->getHwcDisplayId();
+                if (id >= 0) {
+                    const Vector< sp<Layer> >& currentLayers(
+                        hw->getVisibleLayersSortedByZ());
+                    const size_t count = currentLayers.size();
+                    HWComposer::LayerListIterator cur = hwc.begin(id);
+                    const HWComposer::LayerListIterator end = hwc.end(id);
+                    for (size_t i=0 ; cur!=end && i<count ; ++i, ++cur) {
+                        const sp<Layer>& layer(currentLayers[i]);
+                        if(strstr(layer->getName().string(),"_Force_To_Dual") == NULL){
+                            hasNoForceDualUI = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        // whether has _FORCE_TO_DUAL_
+        bool hasForceDualUI = false;
+        if(!hasFBRLayer){
+            for (size_t dpy=0 ; dpy<mDisplays.size() ; dpy++) {
+                sp<const DisplayDevice> hw(mDisplays[dpy]);
+                const int32_t id = hw->getHwcDisplayId();
+                if (id >= 0) {
+                    const Vector< sp<Layer> >& currentLayers(
+                        hw->getVisibleLayersSortedByZ());
+                    const size_t count = currentLayers.size();
+                    HWComposer::LayerListIterator cur = hwc.begin(id);
+                    const HWComposer::LayerListIterator end = hwc.end(id);
+                    for (size_t i=0 ; cur!=end && i<count ; ++i, ++cur) {
+                        const sp<Layer>& layer(currentLayers[i]);
+                        if(strstr(layer->getName().string(),"_Force_To_Dual") != NULL){
+                            hasForceDualUI = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+#endif
+
         // set the per-frame data
         for (size_t dpy=0 ; dpy<mDisplays.size() ; dpy++) {
             sp<const DisplayDevice> hw(mDisplays[dpy]);
@@ -1456,6 +1660,53 @@ void SurfaceFlinger::setUpHWComposer() {
                      */
                     const sp<Layer>& layer(currentLayers[i]);
                     layer->setPerFrameData(hw, *cur);
+#if RK_VR
+                    // vr : setAlreadyStereo
+                    int already3d = 0;
+                    if(hw->getWidth() > hw->getHeight())
+                        already3d = 1;
+                    else
+                        already3d = 2;
+
+                    // property switch
+                    char value[PROPERTY_VALUE_MAX];
+                    property_get("sys.vr.stereo", value, "0");
+                    int enableStereo = atoi(value);
+
+                    if(hasFBRLayer) {
+                        if(strstr(layer->getName().string(),"_Force_To_Dual") != NULL) {
+                            layer->setAlreadyStereo(*cur, 0); // hwc do stereo
+                        } else if(layer->isFBRLayer()) {
+                            layer->setAlreadyStereo(*cur, already3d); // hwc not do stereo
+                        } else {
+                            // not _Force_To_Dual, not FBR   eg: Google Sample k1 k2
+                            if(enableStereo==1)
+                                layer->setAlreadyStereo(*cur, 0); // hwc do stereo
+                            else if(enableStereo==0)
+                                layer->setAlreadyStereo(*cur, already3d); // hwc do stereo
+                            }
+                    }else{
+                        if(enableStereo==1) {
+                            layer->setAlreadyStereo(*cur, 0x8000 | already3d); // hwc do stereo
+                        } else if(enableStereo==0) {
+                            if(hasForceDualUI && !hasNoForceDualUI) {// all layers are _Force_To_Dual layer
+                                layer->setAlreadyStereo(*cur, 0x8000 | already3d); // hwc do stereo
+                            }
+
+                            if(hasForceDualUI && hasNoForceDualUI) {
+                                if(strstr(layer->getName().string(),"_Force_To_Dual") != NULL) {
+                                    layer->setAlreadyStereo(*cur, 0x8000 | already3d); // hwc do stereo
+                                } else {
+                                    layer->setAlreadyStereo(*cur, already3d); // hwc not do stereo
+                                }
+                            }
+
+                            if(!hasForceDualUI && hasNoForceDualUI) {
+                                layer->setAlreadyStereo(*cur, 0); // hwc not do stereo
+                            }
+                        }
+                    }
+#endif
                 }
             }
         }
@@ -1486,6 +1737,21 @@ void SurfaceFlinger::setUpHWComposer() {
         for (size_t dpy=0 ; dpy<mDisplays.size() ; dpy++) {
             sp<const DisplayDevice> hw(mDisplays[dpy]);
             hw->prepareFrame(hwc);
+
+#if RK_STEREO
+            const int32_t id = hw->getHwcDisplayId();
+            if (id >= 0) {
+                const Vector< sp<Layer> >& currentLayers(
+                    hw->getVisibleLayersSortedByZ());
+                const size_t count = currentLayers.size();
+                HWComposer::LayerListIterator cur = hwc.begin(id);
+                const HWComposer::LayerListIterator end = hwc.end(id);
+                for (size_t i=0 ; cur!=end && i<count ; ++i, ++cur) {
+                    const sp<Layer>& layer(currentLayers[i]);
+                    layer->setDisplayStereo(hw, *cur);
+                }
+            }
+#endif
         }
     }
 }
@@ -1529,6 +1795,11 @@ void SurfaceFlinger::postFramebuffer()
         }
         hwc.commit();
     }
+
+#if RK_FPS
+    if (mDebugFPS > 0)
+        debugShowFPS();
+#endif
 
     // make the default display current because the VirtualDisplayDevice code cannot
     // deal with dequeueBuffer() being called outside of the composition loop; however
@@ -1638,6 +1909,18 @@ void SurfaceFlinger::handleTransactionLocked(uint32_t transactionFlags)
             for (size_t i=0 ; i<dc ; i++) {
                 const ssize_t j = curr.indexOfKey(draw.keyAt(i));
                 if (j < 0) {
+#if RK_CTS_GTS
+                    if (draw[i].type == HWC_DISPLAY_VIRTUAL)
+                    {
+                        char value[PROPERTY_VALUE_MAX];
+                        property_get("persist.cts_gts.status", value, "0");
+                        int IsCTS =  !strcmp(value,"true");
+                        if(IsCTS)
+                        {
+                            property_set("sys.hwc.compose_policy", "6");
+                        }
+                    }
+#endif
                     // in drawing state but not in current state
                     if (!draw[i].isMainDisplay()) {
                         // Call makeCurrent() on the primary display so we can
@@ -1711,6 +1994,15 @@ void SurfaceFlinger::handleTransactionLocked(uint32_t transactionFlags)
                         // Virtual displays without a surface are dormant:
                         // they have external state (layer stack, projection,
                         // etc.) but no internal state (i.e. a DisplayDevice).
+#if RK_CTS_GTS
+                        char value[PROPERTY_VALUE_MAX];
+                        property_get("persist.cts_gts.status", value, "0");
+                        int IsCTS =  !strcmp(value,"true");
+                        if(IsCTS)
+                        {
+                            property_set("sys.hwc.compose_policy", "0");
+                        }
+#endif
                         if (state.surface != NULL) {
 
                             int width = 0;
@@ -1756,7 +2048,12 @@ void SurfaceFlinger::handleTransactionLocked(uint32_t transactionFlags)
                                 state.type, hwcDisplayId,
                                 mHwc->getFormat(hwcDisplayId), state.isSecure,
                                 display, dispSurface, producer,
-                                mRenderEngine->getEGLConfig(), false);
+                                mRenderEngine->getEGLConfig(),
+#if !RK_VR & RK_HW_ROTATION
+                                0, // 'hardwareOrientation', 非 primary_display 不涉及 pre_rotation. 
+#endif
+                                false);
+
                         hw->setLayerStack(state.layerStack);
                         hw->setProjection(state.orientation,
                                 state.viewport, state.frame);
@@ -2184,7 +2481,15 @@ bool SurfaceFlinger::doComposeSurfaces(const sp<const DisplayDevice>& hw, const 
     HWComposer& hwc(getHwComposer());
     HWComposer::LayerListIterator cur = hwc.begin(id);
     const HWComposer::LayerListIterator end = hwc.end(id);
+#if RK_COMP_TYPE
+    static int skipCount = 0;
 
+    //Drm mode not need skip the first 5 count. DRM:RK_USE_DRM == 1
+    if (skipCount < 5) {
+        skipCount ++;
+        skipCount = skipCount + (RK_USE_DRM * 5);
+    }
+#endif
     bool hasGlesComposition = hwc.hasGlesComposition(id);
     if (hasGlesComposition) {
         if (!hw->makeCurrent(mEGLDisplay, mEGLContext)) {
@@ -2199,7 +2504,23 @@ bool SurfaceFlinger::doComposeSurfaces(const sp<const DisplayDevice>& hw, const 
 
         // Never touch the framebuffer if we don't have any framebuffer layers
         const bool hasHwcComposition = hwc.hasHwcComposition(id);
-        if (hasHwcComposition) {
+#if RK_COMP_TYPE
+        const bool haveBlit = hwc.hasBlitComposition(id);
+        const bool haveLcdc = hwc.hasLcdComposition(id);
+
+        bool isMixNeedClear = false;
+        if(id <= 1 && cur != end) {
+            isMixNeedClear = cur->getCompositionType() == HWC_MIX_V2;
+        }
+
+        if (skipCount < 5) {
+            ;//do nothing
+            //ALOGD("hwc %d clear skipCount is %d", __LINE__, skipCount);
+        } else if (hasHwcComposition || haveBlit || haveLcdc || isMixNeedClear)
+#else
+	if (hasHwcComposition)
+#endif
+        {
             // when using overlays, we assume a fully transparent framebuffer
             // NOTE: we could reduce how much we need to clear, for instance
             // remove where there are opaque FB layers. however, on some
@@ -2254,6 +2575,14 @@ bool SurfaceFlinger::doComposeSurfaces(const sp<const DisplayDevice>& hw, const 
     const Vector< sp<Layer> >& layers(hw->getVisibleLayersSortedByZ());
     const size_t count = layers.size();
     const Transform& tr = hw->getTransform();
+#if RK_WFD_OPT
+    bool wfdOptimize = mWfdOptimize && (hw->getDisplayType()==DisplayDevice::DISPLAY_VIRTUAL);
+    if (wfdOptimize)
+    {
+      engine.clearWithColor(0, 0, 0, 0);
+    }
+#endif
+
     if (cur != end) {
         // we're using h/w composer
         for (size_t i=0 ; i<count && cur!=end ; ++i, ++cur) {
@@ -2275,7 +2604,10 @@ bool SurfaceFlinger::doComposeSurfaces(const sp<const DisplayDevice>& hw, const 
                         break;
                     }
                     case HWC_FRAMEBUFFER: {
-                        layer->draw(hw, clip);
+#if RK_WFD_OPT
+                        if (!wfdOptimize)
+#endif
+                            layer->draw(hw, clip);
                         break;
                     }
                     case HWC_FRAMEBUFFER_TARGET: {
@@ -2295,7 +2627,10 @@ bool SurfaceFlinger::doComposeSurfaces(const sp<const DisplayDevice>& hw, const 
             const Region clip(dirty.intersect(
                     tr.transform(layer->visibleRegion)));
             if (!clip.isEmpty()) {
-                layer->draw(hw, clip);
+#if RK_WFD_OPT
+                if (!wfdOptimize)
+#endif
+                    layer->draw(hw, clip);
             }
         }
     }
@@ -3571,6 +3906,49 @@ status_t SurfaceFlinger::onTransact(
                 mUseHwcVirtualDisplays = !n;
                 return NO_ERROR;
             }
+#if defined(EECOLOR)
+			case 10000:
+			{
+				__android_log_close();
+				//ALOGD("eeColorAPI case 10000: pEnableEEColor");
+				gEEColorAPIFunctions.pEnableEEColor(data.readInt32() == 1);
+
+				return NO_ERROR;
+			}
+			case 10001:
+			{
+				__android_log_close();
+				//ALOGD("eeColorAPI case 10001: pReadTable");
+
+				int index = data.readInt32();
+				int bytes = data.readInt32();
+				std::vector<int32_t> dataVector;
+				dataVector.reserve(bytes);
+				status_t iRet = data.readInt32Vector(&dataVector);
+				if (iRet == 0)
+				{
+					gEEColorAPIFunctions.pReadTable(index, bytes, dataVector);
+				}
+				else
+				{
+					ALOGE("  %d: Error reading %d bytes", index, bytes);
+				}
+
+				return NO_ERROR;
+			}
+			case 10002:
+			{
+				__android_log_close();
+				//ALOGD("eeColorAPI case 10002: pSetTableType");
+				gEEColorAPIFunctions.pSetTableType(data.readInt32());
+				return NO_ERROR;
+			}
+			case 20000:
+			{
+				reply->writeInt32(gEEColorAPIFunctions.pIsEEColorEnabled() ? 1 : 0);
+				return NO_ERROR;
+			}
+#endif
         }
     }
     return err;
@@ -3808,8 +4186,18 @@ void SurfaceFlinger::renderScreenImplLocked(
     RenderEngine& engine(getRenderEngine());
 
     // get screen geometry
+#if RK_HW_ROTATION
+    int32_t hw_w = hw->getWidth();
+    int32_t hw_h = hw->getHeight();
+    if (orientationSwap()) {
+        hw_w = hw->getHeight();
+        hw_h = hw->getWidth();
+    }
+#else
     const int32_t hw_w = hw->getWidth();
     const int32_t hw_h = hw->getHeight();
+#endif
+
     const bool filtering = static_cast<int32_t>(reqWidth) != hw_w ||
                            static_cast<int32_t>(reqHeight) != hw_h;
 
@@ -3860,7 +4248,9 @@ void SurfaceFlinger::renderScreenImplLocked(
                 return;
             }
             if (filtering) layer->setFiltering(true);
+            layer->setDrawingScreenshot(true);
             layer->draw(hw, useIdentityTransform);
+            layer->setDrawingScreenshot(false);
             if (filtering) layer->setFiltering(false);
         });
     }
@@ -3868,6 +4258,9 @@ void SurfaceFlinger::renderScreenImplLocked(
     // compositionComplete is needed for older driver
     hw->compositionComplete();
     hw->setViewportAndProjection();
+#if RK_DELAY_FOR_CAPTURE
+    mDelayFlag = 1;
+#endif
 }
 
 
@@ -3889,14 +4282,34 @@ status_t SurfaceFlinger::captureScreenImplLocked(
         std::swap(hw_w, hw_h);
     }
 
-    if ((reqWidth > hw_w) || (reqHeight > hw_h)) {
-        ALOGE("size mismatch (%d, %d) > (%d, %d)",
-                reqWidth, reqHeight, hw_w, hw_h);
-        return BAD_VALUE;
-    }
+#if RK_HW_ROTATION
+    if (orientationSwap()) {
+        if (reqWidth == 0 && reqHeight == 0) {
+            reqWidth = hw_h;
+            reqHeight = hw_w;
+        } else {
+            if ((reqWidth > hw_h) || (reqHeight > hw_w)) {
+                ALOGE("size mismatch (%d, %d) > (%d, %d)",
+                        reqWidth, reqHeight, hw_w, hw_h);
+                return BAD_VALUE;
+            }
 
-    reqWidth  = (!reqWidth)  ? hw_w : reqWidth;
-    reqHeight = (!reqHeight) ? hw_h : reqHeight;
+            reqWidth  = (!reqWidth)  ? hw_h : reqWidth;
+            reqHeight = (!reqHeight) ? hw_w : reqHeight;
+        }
+    } else {
+#endif
+        if ((reqWidth > hw_w) || (reqHeight > hw_h)) {
+            ALOGE("size mismatch (%d, %d) > (%d, %d)",
+                    reqWidth, reqHeight, hw_w, hw_h);
+            return BAD_VALUE;
+        }
+
+        reqWidth  = (!reqWidth)  ? hw_w : reqWidth;
+        reqHeight = (!reqHeight) ? hw_h : reqHeight;
+#if RK_HW_ROTATION
+    }
+#endif
 
     bool secureLayerIsVisible = false;
     for (const auto& layer : mDrawingState.layersSortedByZ) {

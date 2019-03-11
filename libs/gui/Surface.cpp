@@ -1305,7 +1305,22 @@ int Surface::setUsage(uint64_t reqUsage)
     if (reqUsage != mReqUsage) {
         mSharedBufferSlot = BufferItem::INVALID_BUFFER_SLOT;
     }
-    mReqUsage = reqUsage;
+#if RK_VR
+    if(reqUsage == 0x08000000)
+    {
+        mReqUsage |= 0x08000000;
+    }
+    else if(mReqUsage & 0x08000000)
+    {
+        mReqUsage = reqUsage;
+        mReqUsage |= 0x08000000;
+    }
+    else
+#else
+    {
+        mReqUsage = reqUsage;
+    }
+#endif
     return OK;
 }
 
@@ -1465,13 +1480,43 @@ int Surface::setScalingMode(int mode)
         case NATIVE_WINDOW_SCALING_MODE_SCALE_CROP:
         case NATIVE_WINDOW_SCALING_MODE_NO_SCALE_CROP:
             break;
+#if RK_STEREO
+        case 300:	// close stereo
+        case 301:	// left-right
+        case 302:	// up-bottom
+        case 308:	// fps
+            break;
+#endif
         default:
             ALOGE("unknown scaling mode: %d", mode);
             return BAD_VALUE;
     }
 
     Mutex::Autolock lock(mMutex);
+#if RK_STEREO
+    if (300 == mode || 301 == mode || 302 == mode || 308 == mode) {
+        if (300 == mode)
+            mScalingMode &= ~0xFF00;
+        if (301 == mode) {
+            mScalingMode &= ~0xFF00;
+            mScalingMode |= 0x100;
+        }
+        if (302 == mode) {
+            mScalingMode &= ~0xFF00;
+            mScalingMode |= 0x200;
+        }
+        if (308 == mode) {
+            mScalingMode &= ~0xFF00;
+            mScalingMode |= 0x800;
+        }
+    } else {
+        mScalingMode &= ~0xff;
+        mScalingMode |= mode;
+    }
+#else
     mScalingMode = mode;
+#endif
+
     return NO_ERROR;
 }
 

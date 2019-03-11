@@ -163,6 +163,38 @@ void Device::destroyDisplay(hwc2_display_t displayId)
 }
 
 void Device::onHotplug(hwc2_display_t displayId, Connection connection) {
+#if 0 //RK_WAIT_HDMI_OUT
+		int count = 0;
+		std::shared_ptr<const HWC2::Display::Config> config = nullptr;
+		auto error = display->getActiveConfig(&config);
+		if (error == HWC2::Error::BadConfig) {
+			ALOGE("getActiveConfig: No config active, returning null");
+			return;
+		} else if (error != HWC2::Error::None) {
+			ALOGE("getActiveConfig failed for display %d: %s (%d)", displayId,
+					to_string(error).c_str(), static_cast<int32_t>(error));
+			return;
+		} else if (!config) {
+			ALOGE("getActiveConfig returned an unknown config for display %d",
+					displayId);
+			return;
+		}
+	
+		while(1 == display->getId() && config != nullptr){
+			usleep(5000);
+			count ++;
+			if(200==count){
+				/*Of course,this cannot be happened:1s*/
+				ALOGW("hotplug remove device,wait timeout");
+				property_set("sys.hwc.htg","false");
+				return;
+			}
+		}
+		if(1 == display->getId()){
+			property_set("sys.hwc.htg","true");
+		}
+#endif
+
     if (connection == Connection::Connected) {
         auto display = getDisplayById(displayId);
         if (display) {
@@ -730,6 +762,21 @@ Layer::~Layer()
         mLayerDestroyedListener(this);
     }
 }
+#if 0
+int32_t getDisplayStereo() const
+{
+    return getLayer()->displayStereo;
+}
+
+Error setAlreadyStereo(int32_t alreadyStereo)
+{
+    getLayer()->alreadyStereo = alreadyStereo;
+}
+Error initDisplayStereo()
+{
+    getLayer()->displayStereo = 0;
+}
+#endif
 
 void Layer::setLayerDestroyedListener(std::function<void(Layer*)> listener) {
     LOG_ALWAYS_FATAL_IF(mLayerDestroyedListener && listener,

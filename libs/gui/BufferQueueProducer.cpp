@@ -58,9 +58,19 @@ BufferQueueProducer::BufferQueueProducer(const sp<BufferQueueCore>& core,
     mNextCallbackTicket(0),
     mCurrentCallbackTicket(0),
     mCallbackCondition(),
-    mDequeueTimeout(-1) {}
+    mDequeueTimeout(-1) {
+#if RK_VR
+        FbrgraphicBuffer  = NULL;
+        bufferchanged = 0;
+        test_cnt = 0;
+#endif
+    }
 
-BufferQueueProducer::~BufferQueueProducer() {}
+BufferQueueProducer::~BufferQueueProducer() {
+#if RK_VR
+    FbrgraphicBuffer = NULL;
+#endif
+}
 
 status_t BufferQueueProducer::requestBuffer(int slot, sp<GraphicBuffer>* buf) {
     ATRACE_CALL();
@@ -250,14 +260,27 @@ status_t BufferQueueProducer::waitForFreeSlotThenRelock(FreeSlotCaller caller,
     auto callerString = (caller == FreeSlotCaller::Dequeue) ?
             "dequeueBuffer" : "attachBuffer";
     bool tryAgain = true;
+#if RK_USE_3_FB
+    bool bFbBufferQueue = false;
+#endif
     while (tryAgain) {
         if (mCore->mIsAbandoned) {
             BQ_LOGE("%s: BufferQueue has been abandoned", callerString);
             return NO_INIT;
         }
 
+#if RK_USE_3_FB
+        if(!strcmp(mCore->mConsumerName,"FramebufferSurface") &&
+            (mCore->mConsumerUsageBits & GRALLOC_USAGE_HW_FB) == GRALLOC_USAGE_HW_FB)
+        {
+            bFbBufferQueue = true;
+        }
+#endif
         int dequeuedCount = 0;
         int acquiredCount = 0;
+        const int maxBufferCount = mCore->getMaxBufferCountLocked();
+
+
         for (int s : mCore->mActiveBuffers) {
             if (mSlots[s].mBufferState.isDequeued()) {
                 ++dequeuedCount;
@@ -265,6 +288,7 @@ status_t BufferQueueProducer::waitForFreeSlotThenRelock(FreeSlotCaller caller,
             if (mSlots[s].mBufferState.isAcquired()) {
                 ++acquiredCount;
             }
+
         }
 
         // Producers are not allowed to dequeue more than
@@ -278,47 +302,96 @@ status_t BufferQueueProducer::waitForFreeSlotThenRelock(FreeSlotCaller caller,
         }
 
         *found = BufferQueueCore::INVALID_BUFFER_SLOT;
+#if RK_USE_3_FB
+        if(bFbBufferQueue)
+        {
+            for (int s = 0; s < maxBufferCount; ++s) {
+
+                if(mSlots[s].mBufferState.isFree())
+                {
+                    // .KP : selecting_free_slot_to_dequue
+                    // We return the oldest of the free buffers
+                    //      to avoid stalling the producer
+                    //      if possible,
+                    // since the consumer
+                    // may still have pending reads
+                    //      of in-flight buffers
+                    if (*found == BufferQueueCore::INVALID_BUFFER_SLOT
+                            || mSlots[s].mFrameNumber < mSlots[*found].mFrameNumber) { // to search for the oldest free buffer_slot
+                        *found = s;
+                        BQ_LOGV("'*found' : %d, buffer in the slot : %p.", *found, mSlots[*found].mGraphicBuffer.get() );
+                    }
+
+                }
+            }
+        }
+#endif
 
         // If we disconnect and reconnect quickly, we can be in a state where
         // our slots are empty but we have many buffers in the queue. This can
         // cause us to run out of memory if we outrun the consumer. Wait here if
         // it looks like we have too many buffers queued up.
-        const int maxBufferCount = mCore->getMaxBufferCountLocked();
         bool tooManyBuffers = mCore->mQueue.size()
                             > static_cast<size_t>(maxBufferCount);
         if (tooManyBuffers) {
             BQ_LOGV("%s: queue size is %zu, waiting", callerString,
                     mCore->mQueue.size());
         } else {
-            // If in shared buffer mode and a shared buffer exists, always
-            // return it.
-            if (mCore->mSharedBufferMode && mCore->mSharedBufferSlot !=
-                    BufferQueueCore::INVALID_BUFFER_SLOT) {
-                *found = mCore->mSharedBufferSlot;
-            } else {
-                if (caller == FreeSlotCaller::Dequeue) {
-                    // If we're calling this from dequeue, prefer free buffers
-                    int slot = getFreeBufferLocked();
-                    if (slot != BufferQueueCore::INVALID_BUFFER_SLOT) {
-                        *found = slot;
-                    } else if (mCore->mAllowAllocation) {
-                        *found = getFreeSlotLocked();
-                    }
+#if RK_USE_3_FB
+            if(bFbBufferQueue)
+            {
+                // If in shared buffer mode and a shared buffer exists, always
+                // return it.
+                if (mCore->mSharedBufferMode && mCore->mSharedBufferSlot !=
+                        BufferQueueCore::INVALID_BUFFER_SLOT) {
+                    *found = mCore->mSharedBufferSlot;
                 } else {
-                    // If we're calling this from attach, prefer free slots
-                    int slot = getFreeSlotLocked();
-                    if (slot != BufferQueueCore::INVALID_BUFFER_SLOT) {
-                        *found = slot;
+                    if (*found != BufferQueueCore::INVALID_BUFFER_SLOT)
+                    {
+                        mCore->mFreeBuffers.remove(*found);
+                        mCore->mFreeSlots.erase(*found);
+                    }
+                }
+            }
+            else
+#endif
+            {
+
+                // If in shared buffer mode and a shared buffer exists, always
+                // return it.
+                if (mCore->mSharedBufferMode && mCore->mSharedBufferSlot !=
+                        BufferQueueCore::INVALID_BUFFER_SLOT) {
+                    *found = mCore->mSharedBufferSlot;
+                } else {
+                    if (caller == FreeSlotCaller::Dequeue) {
+                        // If we're calling this from dequeue, prefer free buffers
+                        int slot = getFreeBufferLocked();
+                        if (slot != BufferQueueCore::INVALID_BUFFER_SLOT) {
+                            *found = slot;
+                        } else if (mCore->mAllowAllocation) {
+                            *found = getFreeSlotLocked();
+                        }
                     } else {
-                        *found = getFreeBufferLocked();
+                        // If we're calling this from attach, prefer free slots
+                        int slot = getFreeSlotLocked();
+                        if (slot != BufferQueueCore::INVALID_BUFFER_SLOT) {
+                            *found = slot;
+                        } else {
+                            *found = getFreeBufferLocked();
+                        }
                     }
                 }
             }
         }
 
-        // If no buffer is found, or if the queue has too many buffers
-        // outstanding, wait for a buffer to be acquired or released, or for the
-        // max buffer count to change.
+        // If no buffer
+        // is found,
+        // or if the queue
+        // has too many buffers outstanding,
+        // wait for a buffer
+        //          to be acquired or released,
+        //      or for the max buffer count
+        //          to change.
         tryAgain = (*found == BufferQueueCore::INVALID_BUFFER_SLOT) ||
                    tooManyBuffers;
         if (tryAgain) {
@@ -463,6 +536,24 @@ status_t BufferQueueProducer::dequeueBuffer(int* outSlot, sp<android::Fence>* ou
             mCore->mIsAllocating = true;
 
             returnFlags |= BUFFER_NEEDS_REALLOCATION;
+#if RK_VR
+            if (usage & 0x08000000)
+            {
+                //int32_t fmt =  (int32_t)format;
+                if ( (buffer != NULL) && (
+                    (static_cast<uint32_t>(buffer->width) != width) ||
+                    (static_cast<uint32_t>(buffer->height) != height) ||
+                    (static_cast<PixelFormat>(buffer->format) != format)/*||
+                    ((static_cast<uint32_t>(buffer->usage) & usage) != usage)*/)
+                  )  // if buffer attribute chaged ,that FBR invalid
+                {
+
+                    FbrgraphicBuffer = NULL;
+                    bufferchanged = 1;
+                    BQ_LOGW("buffer changed force FbrgraphicBuffer = NULL ");
+                }
+            }
+#endif
         } else {
             // We add 1 because that will be the frame number when this buffer
             // is queued
@@ -498,40 +589,78 @@ status_t BufferQueueProducer::dequeueBuffer(int* outSlot, sp<android::Fence>* ou
     } // Autolock scope
 
     if (returnFlags & BUFFER_NEEDS_REALLOCATION) {
+        status_t error;
+
+#if RK_VR
+      //  BQ_LOGD("dequeueBuffer: allocating a new buffer for slot %d,usage=%x,maxBufferCount=%d", *outSlot,usage,maxBufferCount);
+        if(!bufferchanged && (usage & 0x08000000))
+        {
+            if(FbrgraphicBuffer == NULL)
+            {
+
+                sp<GraphicBuffer> graphicBuffer(mCore->mAllocator->createGraphicBuffer(
+                            width, height, format, usage, &error));
+                if (graphicBuffer == NULL) {
+                    BQ_LOGE("dequeueBuffer: createGraphicBuffer failed");
+                    return error;
+                }
+
+                BQ_LOGD("graphicBuffer and set fbrbuffer,FbrgraphicBuffer");
+                FbrgraphicBuffer = graphicBuffer;
+            }
+            { // Autolock scope
+                Mutex::Autolock lock(mCore->mMutex);
+
+                if (mCore->mIsAbandoned) {
+                    BQ_LOGE("dequeueBuffer: BufferQueue has been abandoned");
+                    return NO_INIT;
+                }
+
+                FbrgraphicBuffer->setGenerationNumber(mCore->mGenerationNumber);
+                mSlots[*outSlot].mGraphicBuffer = FbrgraphicBuffer;//graphicBuffer;
+            } // Autolock scope
+
+        }
+        else 
+#else
+        {
         BQ_LOGV("dequeueBuffer: allocating a new buffer for slot %d", *outSlot);
         sp<GraphicBuffer> graphicBuffer = new GraphicBuffer(
                 width, height, format, BQ_LAYER_COUNT, usage,
                 {mConsumerName.string(), mConsumerName.size()});
 
-        status_t error = graphicBuffer->initCheck();
+        error = graphicBuffer->initCheck();
 
         { // Autolock scope
-            Mutex::Autolock lock(mCore->mMutex);
+                Mutex::Autolock lock(mCore->mMutex);
 
-            if (error == NO_ERROR && !mCore->mIsAbandoned) {
-                graphicBuffer->setGenerationNumber(mCore->mGenerationNumber);
-                mSlots[*outSlot].mGraphicBuffer = graphicBuffer;
-            }
+                if (error == NO_ERROR && !mCore->mIsAbandoned) {
+                    graphicBuffer->setGenerationNumber(mCore->mGenerationNumber);
+                    mSlots[*outSlot].mGraphicBuffer = graphicBuffer;
 
-            mCore->mIsAllocating = false;
-            mCore->mIsAllocatingCondition.broadcast();
+                }
+                mCore->mIsAllocating = false;
+                mCore->mIsAllocatingCondition.broadcast();
 
-            if (error != NO_ERROR) {
-                mCore->mFreeSlots.insert(*outSlot);
-                mCore->clearBufferSlotLocked(*outSlot);
-                BQ_LOGE("dequeueBuffer: createGraphicBuffer failed");
-                return error;
-            }
 
-            if (mCore->mIsAbandoned) {
-                mCore->mFreeSlots.insert(*outSlot);
-                mCore->clearBufferSlotLocked(*outSlot);
-                BQ_LOGE("dequeueBuffer: BufferQueue has been abandoned");
-                return NO_INIT;
-            }
+                if (error != NO_ERROR) {
+                    mCore->mFreeSlots.insert(*outSlot);
+                    mCore->clearBufferSlotLocked(*outSlot);
+                    BQ_LOGE("dequeueBuffer: createGraphicBuffer failed");
+                    return error;
+                }
 
-            VALIDATE_CONSISTENCY();
-        } // Autolock scope
+                if (mCore->mIsAbandoned) {
+                    mCore->mFreeSlots.insert(*outSlot);
+                    mCore->clearBufferSlotLocked(*outSlot);
+                    BQ_LOGE("dequeueBuffer: BufferQueue has been abandoned");
+                    return NO_INIT;
+                }
+
+                VALIDATE_CONSISTENCY();
+            } // Autolock scope
+        }
+#endif
     }
 
     if (attachedByConsumer) {
@@ -773,7 +902,11 @@ status_t BufferQueueProducer::queueBuffer(int slot,
 
     auto acquireFenceTime = std::make_shared<FenceTime>(acquireFence);
 
+#if RK_STEREO
+    switch (scalingMode & 0xff) {
+#else
     switch (scalingMode) {
+#endif
         case NATIVE_WINDOW_SCALING_MODE_FREEZE:
         case NATIVE_WINDOW_SCALING_MODE_SCALE_TO_WINDOW:
         case NATIVE_WINDOW_SCALING_MODE_SCALE_CROP:

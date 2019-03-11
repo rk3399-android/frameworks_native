@@ -40,6 +40,15 @@
 #include <set>
 #include <vector>
 
+#if RK_SUPPORT
+#define RK_COMP_TYPE                      (1)
+#define RK_WAIT_HDMI_OUT                  (1)
+#define RK_DRM_HDMI                       (1)
+#define RK_LAYER_NAME                     (1)
+#define RK_USE_BLEND_SEPARATE             (1)
+#define RK_OPT_DVFS                       (1)
+#endif
+
 extern "C" int clock_nanosleep(clockid_t clock_id, int flags,
                            const struct timespec *request,
                            struct timespec *remain);
@@ -114,7 +123,11 @@ public:
 
     // does this display have layers handled by GLES
     bool hasClientComposition(int32_t displayId) const;
-
+#if RK_COMP_TYPE
+    // rk: does this display have layers handled by Blit (rga)
+    bool hasBlitComposition(int32_t id) const;
+    bool hasLcdComposition(int32_t id) const;
+#endif
     // get the present fence received from the last call to present.
     sp<Fence> getPresentFence(int32_t displayId) const;
 
@@ -146,6 +159,11 @@ public:
 
     // Query display parameters.  Pass in a display index (e.g.
     // HWC_DISPLAY_PRIMARY).
+    uint32_t getWidth(int32_t displayId) const;
+    uint32_t getHeight(int32_t displayId) const;
+    float getDpiX(int32_t displayId) const;
+    float getDpiY(int32_t displayId) const;
+
     nsecs_t getRefreshTimestamp(int32_t displayId) const;
     bool isConnected(int32_t displayId) const;
 
@@ -182,6 +200,13 @@ private:
         bool hasClientComposition;
         bool hasDeviceComposition;
         HWC2::Display* hwcDisplay;
+#if RK_COMP_TYPE
+        bool hasBlitComp;
+        bool haslcdComp;
+#endif
+#if RK_SUPPORT
+        size_t updateRefresh;
+#endif
         HWC2::DisplayRequest displayRequests;
         sp<Fence> lastPresentFence;  // signals when the last set op retires
         std::unordered_map<HWC2::Layer*, sp<Fence>> releaseFences;

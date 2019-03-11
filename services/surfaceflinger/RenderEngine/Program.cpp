@@ -22,6 +22,13 @@
 #include "Program.h"
 #include "ProgramCache.h"
 #include "Description.h"
+#include <cutils/properties.h>
+
+#if defined(EECOLOR)
+#include "eeColorAPI/eeColorAPI.h"
+extern eeColor::APIFunctions gEEColorAPIFunctions;
+extern bool gbUseEEColorShader;
+#endif
 
 namespace android {
 
@@ -65,6 +72,12 @@ Program::Program(const ProgramCache::Key& /*needs*/, const char* vertex, const c
         mColorLoc = glGetUniformLocation(programId, "color");
         mAlphaPlaneLoc = glGetUniformLocation(programId, "alphaPlane");
 
+#if !defined(EECOLOR)
+        mxxx1Loc = glGetUniformLocation(programId, "rockchip_xxx1");
+        mxxx2Loc = glGetUniformLocation(programId, "rockchip_xxx2");
+        while(GL_NO_ERROR != glGetError()); // clear GL_ERROR, because these two Loc variants may lost, but that is correct situation.
+#endif
+
         // set-up the default values for our uniforms
         glUseProgram(programId);
         const GLfloat m[16] = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1 };
@@ -81,6 +94,14 @@ bool Program::isValid() const {
 }
 
 void Program::use() {
+#if defined(EECOLOR)
+	if (gbUseEEColorShader)
+	{
+		gEEColorAPIFunctions.pUseProgram();
+		return;
+	}
+#endif
+
     glUseProgram(mProgram);
 }
 
@@ -128,6 +149,14 @@ void Program::setUniforms(const Description& desc) {
     // TODO: we should have a mechanism here to not always reset uniforms that
     // didn't change for this program.
 
+#if defined(EECOLOR)
+	if (gbUseEEColorShader)
+	{
+		gEEColorAPIFunctions.pSetUniforms(desc.mTexture.getMatrix(), desc.mColorMatrix, desc.mProjectionMatrix);
+		return;
+	}
+#endif
+
     if (mSamplerLoc >= 0) {
         glUniform1i(mSamplerLoc, 0);
         glUniformMatrix4fv(mTextureMatrixLoc, 1, GL_FALSE, desc.mTexture.getMatrix().asArray());
@@ -141,6 +170,17 @@ void Program::setUniforms(const Description& desc) {
     if (mColorMatrixLoc >= 0) {
         glUniformMatrix4fv(mColorMatrixLoc, 1, GL_FALSE, desc.mColorMatrix.asArray());
     }
+#if !defined(EECOLOR)
+    if (mxxx1Loc >= 0){
+        glUniform1i(mxxx1Loc, 1); // GL_TEXTURE1
+    }
+    if (mxxx2Loc >= 0){
+        char value[PROPERTY_VALUE_MAX];
+        property_get("sys.xxx.rock", value, "2.3");
+        float xxx2 = atof(value);
+        glUniform1f(mxxx2Loc, xxx2);
+    }
+#endif
     // these uniforms are always present
     glUniformMatrix4fv(mProjectionMatrixLoc, 1, GL_FALSE, desc.mProjectionMatrix.asArray());
 }

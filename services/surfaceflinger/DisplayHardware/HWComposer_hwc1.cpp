@@ -140,7 +140,11 @@ HWComposer::HWComposer(
             mCBContext->hwc = this;
             mCBContext->procs.invalidate = &hook_invalidate;
             mCBContext->procs.vsync = &hook_vsync;
-            if (hwcHasApiVersion(mHwc, HWC_DEVICE_API_VERSION_1_1))
+            if (hwcHasApiVersion(mHwc, HWC_DEVICE_API_VERSION_1_1)
+#if RK_DRM_HDMI
+                || hwcHasApiVersion(mHwc, HWC_DEVICE_API_VERSION_1_4)
+#endif
+            )
                 mCBContext->procs.hotplug = &hook_hotplug;
             else
                 mCBContext->procs.hotplug = NULL;
@@ -155,7 +159,11 @@ HWComposer::HWComposer(
 
         // the number of displays we actually have depends on the
         // hw composer version
-        if (hwcHasApiVersion(mHwc, HWC_DEVICE_API_VERSION_1_3)) {
+        if (hwcHasApiVersion(mHwc, HWC_DEVICE_API_VERSION_1_3)
+#if RK_DRM_HDMI
+            || hwcHasApiVersion(mHwc, HWC_DEVICE_API_VERSION_1_4)
+#endif
+            ) {
             // 1.3 adds support for virtual displays
             mNumDisplays = MAX_HWC_DISPLAYS;
         } else if (hwcHasApiVersion(mHwc, HWC_DEVICE_API_VERSION_1_1)) {
@@ -312,6 +320,16 @@ void HWComposer::hotplug(int disp, int connected) {
                 disp, connected);
         return;
     }
+
+#if !RK_USE_DRM && RK_SUPPORT
+    if (disp == HWC_DISPLAY_PRIMARY) {
+        int value = 0;
+        mHwc->query(mHwc, HWC_VSYNC_PERIOD, &value);
+        mDisplayData[disp].updateRefresh = size_t(value);
+        return;
+    }
+#endif
+
     queryDisplayProperties(disp);
     // Do not teardown or recreate the primary display
     if (disp != HWC_DISPLAY_PRIMARY) {
@@ -371,6 +389,24 @@ status_t HWComposer::queryDisplayProperties(int disp) {
     }
 
     mDisplayData[disp].currentConfig = 0;
+
+#if RK_WAIT_HDMI_OUT
+    int count = 0;
+    while(1 == disp && mDisplayData[disp].configs.size()){
+        usleep(5000);
+        count ++;
+        if(200==count){
+            /*Of course,this cannot be happened:1s*/
+            ALOGW("hotplug remove device,wait timeout");
+            property_set("sys.hwc.htg","false");
+            return NO_INIT;
+        }
+    }
+    if(1 == disp){
+        property_set("sys.hwc.htg","true");
+    }
+#endif
+
     for (size_t c = 0; c < numConfigs; ++c) {
         err = mHwc->getDisplayAttributes(mHwc, disp, configs[c],
                 DISPLAY_ATTRIBUTES, values);
@@ -518,6 +554,10 @@ float HWComposer::getDpiY(int disp) const {
 
 nsecs_t HWComposer::getRefreshPeriod(int disp) const {
     size_t currentConfig = mDisplayData[disp].currentConfig;
+#if RK_SUPPORT
+    if (mDisplayData[disp].updateRefresh > 0)
+        return mDisplayData[disp].updateRefresh;
+#endif
     return mDisplayData[disp].configs[currentConfig].refresh;
 }
 
@@ -714,9 +754,13 @@ status_t HWComposer::prepare() {
                     //ALOGD("prepare: %d, type=%d, handle=%p",
                     //        i, l.compositionType, l.handle);
 
+#if !RK_SUPPORT
                     if (l.flags & HWC_SKIP_LAYER) {
+
                         l.compositionType = HWC_FRAMEBUFFER;
+
                     }
+#endif
                     if (l.compositionType == HWC_FRAMEBUFFER) {
                         disp.hasFbComp = true;
                     }
@@ -749,6 +793,19 @@ bool HWComposer::hasGlesComposition(int32_t id) const {
         return true;
     return mDisplayData[id].hasFbComp;
 }
+
+#if RK_COMP_TYPE
+bool HWComposer::hasBlitComposition(int32_t id) const {
+    if (!mHwc || uint32_t(id)>31 || !mAllocatedDisplayIDs.hasBit(id))
+        return true;
+    return mDisplayData[id].hasBlitComp;
+}
+bool HWComposer::hasLcdComposition(int32_t id) const {
+    if (uint32_t(id)>31 || !mAllocatedDisplayIDs.hasBit(id))
+        return false;
+    return mDisplayData[id].haslcdComp;
+}
+#endif
 
 sp<Fence> HWComposer::getAndResetReleaseFence(int32_t id) {
     if (uint32_t(id)>31 || !mAllocatedDisplayIDs.hasBit(id))
@@ -991,6 +1048,24 @@ public:
             }
         }
     }
+#if RK_STEREO
+    virtual void setAlreadyStereo(int32_t alreadyStereo) {
+        getLayer()->alreadyStereo = alreadyStereo;
+    }
+    virtual int32_t getDisplayStereo() const {
+        return getLayer()->displayStereo;
+    }
+    virtual void initDisplayStereo() {
+        getLayer()->displayStereo = 0;
+    }
+#endif
+    virtual void setDataspace(android_dataspace_t dataspace) {
+        getLayer()->reserved[0] = dataspace & 0xFF;
+        getLayer()->reserved[1] = (dataspace >> 8) & 0xFF;
+        getLayer()->reserved[2] = (dataspace >> 16) & 0xFF;
+        getLayer()->reserved[3] = (dataspace >> 24) & 0xFF;
+    }
+
     virtual void setDefaultState() {
         hwc_layer_1_t* const l = getLayer();
         l->compositionType = HWC_FRAMEBUFFER;
@@ -1004,6 +1079,10 @@ public:
         l->acquireFenceFd = -1;
         l->releaseFenceFd = -1;
         l->planeAlpha = 0xFF;
+        l->reserved[0] = 0;
+        l->reserved[1] = 0;
+        l->reserved[2] = 0;
+        l->reserved[3] = 0;
     }
     virtual void setSkip(bool skip) {
         if (skip) {
@@ -1031,9 +1110,21 @@ public:
     virtual void setFrame(const Rect& frame) {
         getLayer()->displayFrame = reinterpret_cast<hwc_rect_t const&>(frame);
     }
+#if RK_VR
+    virtual void getFrame(Rect& frame) {
+        frame = reinterpret_cast<Rect const&>(getLayer()->displayFrame);
+    }
+#endif
     virtual void setCrop(const FloatRect& crop) {
         if (hwcHasApiVersion(mHwc, HWC_DEVICE_API_VERSION_1_3)) {
             getLayer()->sourceCropf = reinterpret_cast<hwc_frect_t const&>(crop);
+#if !RK_USE_DRM
+            hwc_rect_t& r = getLayer()->sourceCrop;
+            r.left  = int(ceilf(crop.left));
+            r.top   = int(ceilf(crop.top));
+            r.right = int(floorf(crop.right));
+            r.bottom= int(floorf(crop.bottom));
+#endif
         } else {
             /*
              * Since h/w composer didn't support a flot crop rect before version 1.3,
@@ -1095,7 +1186,15 @@ public:
     virtual void onDisplayed() {
         getLayer()->acquireFenceFd = -1;
     }
-
+#if RK_LAYER_NAME
+    virtual void setLayername(const char *layername) {
+        int strlens ;
+        strlens = strlen(layername);
+        strlens = strlens > LayerNameLength ? LayerNameLength:strlens;
+        memcpy(getLayer()->LayerName,layername,strlens);
+        getLayer()->LayerName[strlens] = 0;
+    }
+#endif
 protected:
     // Pointers to the vectors of Region backing-memory held in DisplayData.
     // Only the Region at mIndex corresponds to this Layer.
@@ -1234,7 +1333,17 @@ void HWComposer::dump(String8& result) const {
                             "FB TARGET",
                             "SIDEBAND",
                             "HWC_CURSOR",
+#if RK_COMP_TYPE
+                            "HWC_TOWIN0",
+                            "HWC_TOWIN1",
+                            "HWC_LCDC",
+                            "HWC_NODRAW",
+                            "HWC_MIX",
+                            "HWC_MIX_V2",
+                            "blit"};
+#else
                             "UNKNOWN"};
+#endif
                     if (type >= NELEM(compositionTypeName))
                         type = NELEM(compositionTypeName) - 1;
 
@@ -1331,6 +1440,12 @@ HWComposer::DisplayData::DisplayData()
     format(HAL_PIXEL_FORMAT_RGBA_8888),
     connected(false),
     hasFbComp(false), hasOvComp(false),
+#if RK_COMP_TYPE
+    hasBlitComp(false), haslcdComp(false),
+#endif
+#if RK_SUPPORT
+    updateRefresh(0),
+#endif
     capacity(0), list(NULL),
     framebufferTarget(NULL), fbTargetHandle(0),
     lastRetireFence(Fence::NO_FENCE), lastDisplayFence(Fence::NO_FENCE),

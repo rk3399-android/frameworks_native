@@ -38,23 +38,25 @@ class Description {
     // value of the plane-alpha, between 0 and 1
     GLclampf mPlaneAlpha;
     // whether textures are premultiplied
-    bool mPremultipliedAlpha;
+    bool mPremultipliedAlpha = false;
     // whether this layer is marked as opaque
-    bool mOpaque;
+    bool mOpaque = false;
 
     // Texture this layer uses
     Texture mTexture;
-    bool mTextureEnabled;
+    bool mTextureEnabled = false;
 
     // color used when texturing is disabled
     GLclampf mColor[4];
     // projection matrix
     mat4 mProjectionMatrix;
 
-    bool mColorMatrixEnabled;
+    bool mColorMatrixEnabled = false;
+    bool mHdr = false;
+    Texture mMRatioTexture;
     mat4 mColorMatrix;
 
-    bool mIsWideGamut;
+    bool mIsWideGamut = false;
 
 public:
     Description();
@@ -64,10 +66,12 @@ public:
     void setPremultipliedAlpha(bool premultipliedAlpha);
     void setOpaque(bool opaque);
     void setTexture(const Texture& texture);
+    void setMRatioTexture(const Texture& texture);
     void disableTexture();
     void setColor(GLclampf red, GLclampf green, GLclampf blue, GLclampf alpha);
     void setProjectionMatrix(const mat4& mtx);
     void setColorMatrix(const mat4& mtx);
+    void setHdr(bool deformstus);
     const mat4& getColorMatrix() const;
     void setWideGamut(bool wideGamut);
 };

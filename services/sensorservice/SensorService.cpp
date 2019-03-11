@@ -130,6 +130,13 @@ void SensorService::enableSchedFifoMode() {
 
 void SensorService::onFirstRef() {
     ALOGD("nuSensorService starting...");
+    char value[PROPERTY_VALUE_MAX];
+    property_get("ro.target.product", value, "0");
+    if(!strcmp("box",value) || !strcmp("atv",value))
+    {
+        ALOGD("TV device do not have sensor, skip!");
+        return;
+    }
     SensorDevice& dev(SensorDevice::getInstance());
 
     sHmacGlobalKeyIsValid = initializeHmacKey();

@@ -43,6 +43,11 @@
 #include <memory>
 #endif
 
+#if RK_SUPPORT
+#define RK_FORCE_SCALE_FULLSCREEN         (1)
+#define RK_HW_ROTATION                    (1)
+#endif
+
 struct ANativeWindow;
 
 namespace android {
@@ -96,8 +101,12 @@ public:
             const sp<DisplaySurface>& displaySurface,
             const sp<IGraphicBufferProducer>& producer,
             EGLConfig config,
+#if !RK_VR & RK_HW_ROTATION
+            int hardwareOrientation,
+#endif
             bool supportWideColor);
     // clang-format on
+
 
     ~DisplayDevice();
 
@@ -129,11 +138,19 @@ public:
     void                    setLayerStack(uint32_t stack);
     void                    setDisplaySize(const int newWidth, const int newHeight);
     void                    setProjection(int orientation, const Rect& viewport, const Rect& frame);
-
+#if RK_HW_ROTATION
+    int                     getOrientation() const { return mClientOrientation; }
+    int                     getHardwareRotation() const { return mOrientation; }
+#else
     int                     getOrientation() const { return mOrientation; }
+#endif
     uint32_t                getOrientationTransform() const;
     static uint32_t         getPrimaryDisplayOrientationTransform();
     const Transform&        getTransform() const { return mGlobalTransform; }
+#if RK_HW_ROTATION
+    const Transform&        getTransform(bool shouldTransform) const { return shouldTransform ? mGlobalTransform : mRealGlobalTransform; }
+    const Transform&        getRealTransform() const { return mRealGlobalTransform; }
+#endif
     const Rect              getViewport() const { return mViewport; }
     const Rect              getFrame() const { return mFrame; }
     const Rect&             getScissor() const { return mScissor; }
@@ -144,6 +161,7 @@ public:
     bool                    isPrimary() const { return mType == DISPLAY_PRIMARY; }
     int32_t                 getHwcDisplayId() const { return mHwcDisplayId; }
     const wp<IBinder>&      getDisplayToken() const { return mDisplayToken; }
+    EGLDisplay              getEglDisplay() const { return mDisplay; }
 
     // We pass in mustRecompose so we can keep VirtualDisplaySurface's state
     // machine happy without actually queueing a buffer if nothing has changed
@@ -253,7 +271,35 @@ private:
     // "surfaces"). Any given layer can only be on a single layer stack.
     uint32_t mLayerStack;
 
-    int mOrientation;
+    /** 
+     * 待显示的 layer_stack 以 original_display 为基准的 orientation.
+     */
+    int mOrientation;   // 取值诸如 0, 1(顺时针转过 90 度), 2, 3.
+
+#if RK_HW_ROTATION
+    /** 
+     * display_pre_rotation_extension 引入的, 
+     * 表征 client 请求的 display (display_saw_by_sf_clients) 的 orientation.
+     * 待显示的 layer_stack 以 display_saw_by_sf_clients 为基准的 orientation.
+     */
+    int mClientOrientation;
+#if !RK_VR
+    /**
+     * .DP : orientation_of_pre_rotated_display : 
+     * display_pre_rotation_extension 引入的, 
+     * pre_rotated_display 的 default_orientation 相对 original_display 的 coordinate_system 的 orientation.
+     * 可能的取值诸如 0, 1(顺时针转过 90 度), 2(180 度), 3(270 度).
+     *
+     * wms 通过 sf 的 getdisplayconfigs 得到 display_info 都是 pre_rotated_display 的信息, 
+     * 比如 pre_rotation 是顺时针转过 90 度, 则 pre_rotated_display 的高度是 original_display 的宽度, 宽度是高度. 
+     * pre_rotated_display 也记为 display_saw_by_sf_clients. 
+     *
+     * 默认为 0, 不起任何作用. 
+     * 只可能在 primary_display 中实际使用. 
+     */
+    int mHardwareOrientation;
+#endif
+#endif
     static uint32_t sPrimaryDisplayOrientation;
     // user-provided visible area of the layer stack
     Rect mViewport;
@@ -262,6 +308,9 @@ private:
     // pre-computed scissor to apply to the display
     Rect mScissor;
     Transform mGlobalTransform;
+#if RK_HW_ROTATION
+    Transform mRealGlobalTransform;
+#endif
     bool mNeedsFiltering;
     // Current power mode
     int mPowerMode;

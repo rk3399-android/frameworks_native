@@ -73,6 +73,10 @@ public:
             WIDE_GAMUT_OFF          =       0x00000000,
             WIDE_GAMUT_ON           =       0x00000040,
             WIDE_GAMUT_MASK         =       0x00000040,
+            
+            HDR_MASK                =       0x00001000,
+            HDR_ON                  =       0x00001000,
+            HDR_OFF                 =       0x00000000,
         };
 
         inline Key() : mKey(0) { }
@@ -104,7 +108,9 @@ public:
         inline bool isWideGamut() const {
             return (mKey & WIDE_GAMUT_MASK) == WIDE_GAMUT_ON;
         }
-
+        inline bool hasHdr() const {
+            return (mKey & HDR_MASK) == HDR_ON;
+        }
         // this is the definition of a friend function -- not a method of class Needs
         friend inline int strictly_order_type(const Key& lhs, const Key& rhs) {
             return (lhs.mKey < rhs.mKey) ? 1 : 0;

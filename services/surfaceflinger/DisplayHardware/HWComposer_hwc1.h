@@ -34,6 +34,15 @@
 #include <utils/Timers.h>
 #include <utils/Vector.h>
 
+#if RK_SUPPORT
+#define RK_COMP_TYPE                      (1)
+#define RK_WAIT_HDMI_OUT                  (1)
+#define RK_DRM_HDMI                       (1)
+#define RK_LAYER_NAME                     (1)
+#define RK_USE_BLEND_SEPARATE             (1)
+#define RK_OPT_DVFS                       (1)
+#endif
+
 extern "C" int clock_nanosleep(clockid_t clock_id, int flags,
                            const struct timespec *request,
                            struct timespec *remain);
@@ -120,7 +129,11 @@ public:
 
     // does this display have layers handled by GLES
     bool hasGlesComposition(int32_t id) const;
-
+#if RK_COMP_TYPE
+    // rk: does this display have layers handled by Blit (rga)
+    bool hasBlitComposition(int32_t id) const;
+    bool hasLcdComposition(int32_t id) const;
+#endif
     // get the releaseFence file descriptor for a display's framebuffer layer.
     // the release fence is only valid after commit()
     sp<Fence> getAndResetReleaseFence(int32_t id);
@@ -170,6 +183,9 @@ public:
         virtual void setBlending(uint32_t blending) = 0;
         virtual void setTransform(uint32_t transform) = 0;
         virtual void setFrame(const Rect& frame) = 0;
+#if RK_VR
+	virtual void getFrame(Rect& frame) = 0;
+#endif
         virtual void setCrop(const FloatRect& crop) = 0;
         virtual void setVisibleRegionScreen(const Region& reg) = 0;
         virtual void setSurfaceDamage(const Region& reg) = 0;
@@ -178,6 +194,15 @@ public:
         virtual void setAcquireFenceFd(int fenceFd) = 0;
         virtual void setPlaneAlpha(uint8_t alpha) = 0;
         virtual void onDisplayed() = 0;
+#if RK_LAYER_NAME
+        virtual void setLayername( const char *layername) = 0;
+#endif
+#if RK_STEREO
+        virtual void setAlreadyStereo(int32_t alreadyStereo) = 0;
+        virtual int32_t getDisplayStereo() const = 0;
+        virtual void initDisplayStereo() = 0;
+#endif
+	virtual void setDataspace(android_dataspace_t dataspace);
     };
 
     /*
@@ -286,6 +311,9 @@ public:
     float getDpiX(int disp) const;
     float getDpiY(int disp) const;
     nsecs_t getRefreshPeriod(int disp) const;
+#if RK_SUPPORT
+    size_t updateRefreshPeriod(int disp ,size_t refresh);
+#endif
     android_color_mode_t getColorMode(int disp) const;
 
     const Vector<DisplayConfig>& getConfigs(int disp) const;
@@ -347,6 +375,13 @@ private:
         bool connected;
         bool hasFbComp;
         bool hasOvComp;
+#if RK_COMP_TYPE
+        bool hasBlitComp;
+        bool haslcdComp;
+#endif
+#if RK_SUPPORT
+        size_t updateRefresh;
+#endif
         size_t capacity;
         hwc_display_contents_1* list;
         hwc_layer_1* framebufferTarget;
